@@ -1,0 +1,11 @@
+{
+    "display_name": "Crib Note",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Near7707",
+    "version": "0.8.1",
+    "homePage": "https://github.com/Near7707/CribNote"
+}
