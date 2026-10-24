@@ -171,7 +171,7 @@
 .cuecard-frame {
     display: flex;
     flex-direction: column;
-    max-height: 50vh;
+    max-height: 60vh;
 }
 .cuecard-head {
     flex-shrink: 0;
@@ -183,3 +183,105 @@
     padding: 0 8px 8px;
     overscroll-behavior: contain;
 }
+
+/* v0.9 */
+.cuecard-opts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 6px;
+}
+.cuecard-cycle {
+    border-style: dashed;
+    opacity: 0.85;
+}
+
+.cuecard-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.cuecard-card { white-space: normal; }
+.cuecard-card-text { white-space: pre-wrap; }
+.cuecard-tools {
+    display: flex;
+    justify-content: flex-end;
+    gap: 14px;
+    font-size: 0.85em;
+}
+.cuecard-tool {
+    cursor: pointer;
+    opacity: 0.45;
+    padding: 2px;
+}
+.cuecard-tool:hover { opacity: 1; }
+.cuecard-tool.pinned {
+    opacity: 1;
+    color: var(--SmartThemeQuoteColor);
+}
+.cuecard-card.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+.cuecard-card.used .cuecard-tools { opacity: 1; }
+
+.cuecard-pending {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 5px 8px;
+    border: 1px dashed var(--SmartThemeQuoteColor);
+    border-radius: 8px;
+    font-size: 0.9em;
+}
+.cuecard-pending > span:first-child { flex: 1; }
+.cuecard-pending-x { cursor: pointer; opacity: 0.7; }
+.cuecard-pending-x:hover { opacity: 1; }
+
+#cuecard_button { position: relative; }
+#cuecard_button.cuecard-has-pending::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--SmartThemeQuoteColor);
+}
+#cuecard_pin_btn.cuecard-has-note {
+    color: var(--SmartThemeQuoteColor);
+    border-color: var(--SmartThemeQuoteColor);
+}
+.cuecard-empty { opacity: 0.6; }
+
+.cuecard-custom-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.cuecard-custom-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+.cuecard-custom-item small {
+    flex: 1;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cuecard-custom-del { cursor: pointer; opacity: 0.6; }
+.cuecard-custom-del:hover { opacity: 1; }
+.cuecard-custom-add {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+.cuecard-custom-add input { flex: 1 1 140px; margin: 0; }
+.cuecard-custom-add .menu_button { margin: 0; }

@@ -1,4 +1,4 @@
-// Crib Note v0.8.1 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.0 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -28,7 +28,30 @@
         closeOnOutside: false, // 패널 바깥을 누르면 닫기
         lastMood: 'normal',
         charSummaries: {},     // 캐릭터별 요약 { avatar: {text, hash, date} }
+        customMoods: [],       // 내 분위기 [{id, label, desc}]
+        lastLength: 'normal',  // short | normal | long
+        lastForm: 'free',      // free | dialogue | action
+        ideaMode: 'ooc',       // ooc: 입력창에 OOC로 / hidden: 다음 답변에 몰래 반영
     };
+
+    const LENGTHS = { normal: '길이: 보통', short: '길이: 짧게', long: '길이: 길게' };
+    const FORMS = { free: '형식: 자유', dialogue: '형식: 대사만', action: '형식: 행동만' };
+    const LANGS = { ko: '답변: 한글', en: '답변: EN', auto: '답변: 대화 따라' };
+    const IDEA_MODES = { ooc: '전개: OOC', hidden: '전개: 몰래' };
+    const CYCLES = {
+        lastLength: { labels: LENGTHS, select: null },
+        lastForm: { labels: FORMS, select: null },
+        language: { labels: LANGS, select: '#cuecard_language' },
+        ideaMode: { labels: IDEA_MODES, select: '#cuecard_idea_mode' },
+    };
+
+    const PIN_KEY = 'cuecard_pins';
+    const PENDING_KEY = 'cuecard_pending';
+    const EXT_PROMPT_KEY = 'cribnote_direction';
+
+    function allMoods() {
+        return [...MOODS, ...(settings().customMoods || [])];
+    }
 
     const ICON_SVG = '<svg viewBox="0 0 32 32" aria-hidden="true"><g transform="rotate(-8 16 16)"><path d="M7 5h13l5 5v17H7z" fill="#FAEEDA" stroke="#BA7517" stroke-width="1.3" stroke-linejoin="round"/><path d="M20 5v5h5" fill="#FAC775" stroke="#BA7517" stroke-width="1.1" stroke-linejoin="round"/><path d="M10 14h9M10 18h10M10 22h6" stroke="#BA7517" stroke-width="1" stroke-linecap="round"/></g><path d="M22 23.5c-2.5-1.8-3-3.6-2-4.5.8-.7 1.7-.3 2 .4.3-.7 1.2-1.1 2-.4 1 .9.5 2.7-2 4.5z" fill="#ED93B1" stroke="#D4537E" stroke-width="0.8"/></svg>';
 
@@ -84,11 +107,6 @@
     }
 
     function buildSettingsHtml() {
-        const moodChecks = MOODS.map(m => `
-            <label class="checkbox_label">
-                <input type="checkbox" class="cuecard_randmood" value="${m.id}"> ${m.label}
-            </label>`).join('');
-
         return `
         <div class="cuecard-settings">
             <div class="inline-drawer">
@@ -144,6 +162,13 @@
                     </div>
                     <small>답변 후보 언어는 추천 패널에서도 바로 바꿀 수 있어요.</small>
 
+                    <label for="cuecard_idea_mode">전개 쪽지를 고르면</label>
+                    <select id="cuecard_idea_mode" class="text_pole">
+                        <option value="ooc">입력창에 (OOC: …)로 넣기</option>
+                        <option value="hidden">다음 답변에 몰래 반영 (채팅에 안 남음)</option>
+                    </select>
+                    <small>몰래 반영은 작가 노트처럼 AI한테만 보이고, 다음 답변 한 번만 적용돼요. 패널에서도 바꿀 수 있어요.</small>
+
                     <label class="checkbox_label"><input id="cuecard_use_persona" type="checkbox"> 페르소나 설명 참고</label>
                     <label class="checkbox_label"><input id="cuecard_auto_close" type="checkbox"> 추천을 고르면 패널 자동으로 닫기</label>
                     <label class="checkbox_label"><input id="cuecard_close_outside" type="checkbox"> 패널 바깥을 누르면 닫기</label>
@@ -152,8 +177,17 @@
 
                     <small>📝 내 캐릭터 메모는 채팅방마다 따로 적어요. 추천 패널의 연필 버튼을 눌러보세요.</small>
 
+                    <label>🎨 내 분위기</label>
+                    <div id="cuecard_custom_list" class="cuecard-custom-list"></div>
+                    <div class="cuecard-custom-add">
+                        <input id="cuecard_custom_label" class="text_pole" type="text" maxlength="12" placeholder="이름 (예: 도깨비 장난)">
+                        <input id="cuecard_custom_desc" class="text_pole" type="text" maxlength="200" placeholder="설명 (선택) 예: 도깨비가 몰래 장난을 쳐서 일이 꼬임">
+                        <div id="cuecard_custom_add" class="menu_button">추가</div>
+                    </div>
+                    <small>설명을 적으면 AI가 분위기를 더 잘 알아들어요. 비우면 이름만 보내요.</small>
+
                     <label>🎲 랜덤에 포함할 분위기</label>
-                    <div class="cuecard-moodchecks">${moodChecks}</div>
+                    <div id="cuecard_moodchecks" class="cuecard-moodchecks"></div>
 
                     <div id="cuecard_view_prompt_s" class="menu_button">👁 보낸 프롬프트 보기</div>
                   </div>
@@ -162,8 +196,51 @@
         </div>`;
     }
 
+    function renderMoodSettings() {
+        const st = settings();
+        $('#cuecard_moodchecks').html(allMoods().map(m => `
+            <label class="checkbox_label">
+                <input type="checkbox" class="cuecard_randmood" value="${escapeHtml(m.id)}"${st.randomMoods.includes(m.id) ? ' checked' : ''}> ${escapeHtml(m.label)}
+            </label>`).join(''));
+        $('#cuecard_custom_list').html(st.customMoods.length
+            ? st.customMoods.map(m => `
+                <div class="cuecard-custom-item">
+                    <b>${escapeHtml(m.label)}</b>
+                    <small>${escapeHtml(m.desc || '')}</small>
+                    <span class="cuecard-custom-del fa-solid fa-trash" data-id="${escapeHtml(m.id)}" title="삭제"></span>
+                </div>`).join('')
+            : '<small class="cuecard-empty">아직 없어요. 아래에서 추가해보세요.</small>');
+    }
+
+    function addCustomMood() {
+        const st = settings();
+        const label = String($('#cuecard_custom_label').val() || '').trim().slice(0, 12);
+        const desc = String($('#cuecard_custom_desc').val() || '').trim().slice(0, 200);
+        if (!label) { toastr.info('분위기 이름을 적어주세요.', 'Crib Note'); return; }
+        if (allMoods().some(m => m.label === label)) { toastr.info('이미 있는 분위기예요.', 'Crib Note'); return; }
+        const id = 'c' + Date.now().toString(36);
+        st.customMoods.push({ id, label, desc });
+        st.randomMoods.push(id);
+        save();
+        $('#cuecard_custom_label').val('');
+        $('#cuecard_custom_desc').val('');
+        renderMoodSettings();
+        renderMoodChips();
+    }
+
+    function removeCustomMood(id) {
+        const st = settings();
+        st.customMoods = st.customMoods.filter(m => m.id !== id);
+        st.randomMoods = st.randomMoods.filter(x => x !== id);
+        if (st.lastMood === id) st.lastMood = 'normal';
+        save();
+        renderMoodSettings();
+        renderMoodChips();
+    }
+
     function bindSettings() {
         const st = settings();
+        renderMoodSettings();
 
         fillProfileSelect();
         $('#cuecard_profile').on('change', function () { st.profileId = $(this).val(); save(); });
@@ -183,7 +260,8 @@
         num('#cuecard_context', 'contextMessages', 1, 60);
         num('#cuecard_max_tokens', 'maxTokens', 200, 8000);
 
-        $('#cuecard_language').val(st.language).on('change', function () { st.language = $(this).val(); save(); refreshLangChip(); });
+        $('#cuecard_language').val(st.language).on('change', function () { st.language = $(this).val(); save(); refreshCycleChips(); });
+        $('#cuecard_idea_mode').val(st.ideaMode).on('change', function () { st.ideaMode = $(this).val(); save(); refreshCycleChips(); });
         $('#cuecard_idea_language').val(st.ideaLanguage).on('change', function () { st.ideaLanguage = $(this).val(); save(); });
         $('#cuecard_use_persona').prop('checked', st.usePersona).on('change', function () { st.usePersona = this.checked; save(); });
         $('#cuecard_use_character').prop('checked', st.useCharacter).on('change', function () { st.useCharacter = this.checked; save(); });
@@ -191,31 +269,39 @@
         $('#cuecard_close_outside').prop('checked', st.closeOnOutside).on('change', function () { st.closeOnOutside = this.checked; save(); });
         $('#cuecard_view_prompt_s').on('click', showPrompt);
 
-        $('.cuecard_randmood').each(function () {
-            $(this).prop('checked', st.randomMoods.includes(this.value));
-        }).on('change', () => {
-            st.randomMoods = $('.cuecard_randmood:checked').map((_, el) => el.value).get();
+        $('#cuecard_moodchecks').on('change', '.cuecard_randmood', () => {
+            settings().randomMoods = $('.cuecard_randmood:checked').map((_, el) => el.value).get();
             save();
+        });
+        $('#cuecard_custom_add').on('click', addCustomMood);
+        $('#cuecard_custom_desc').on('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addCustomMood(); } });
+        $('#cuecard_custom_list').on('click', '.cuecard-custom-del', function () {
+            const id = String($(this).data('id'));
+            const m = settings().customMoods.find(x => x.id === id);
+            if (m && confirm(`'${m.label}' 분위기를 지울까요?`)) removeCustomMood(id);
         });
     }
 
     // ---------- 패널 UI ----------
     function buildPanel() {
-        const chips = MOODS.map(m =>
-            `<div class="cuecard-chip" data-mood="${m.id}">${m.label}</div>`).join('');
+        const cycle = (key, title) => `<div class="cuecard-chip cuecard-cycle" data-key="${key}" title="${title}"></div>`;
         return `
         <div id="cuecard_panel" style="display:none">
           <div class="cuecard-frame">
            <div class="cuecard-head">
-            <div class="cuecard-moods">
-                ${chips}
-                <div class="cuecard-chip" data-mood="random">🎲 랜덤</div>
-                <div id="cuecard_lang_chip" class="cuecard-chip cuecard-lang" title="답변 후보 언어 바꾸기"></div>
+            <div id="cuecard_moods" class="cuecard-moods"></div>
+            <div class="cuecard-opts">
+                ${cycle('lastLength', '대사 쪽지 길이')}
+                ${cycle('lastForm', '대사 쪽지 형식')}
+                ${cycle('language', '대사 쪽지 언어')}
+                ${cycle('ideaMode', '전개 쪽지를 고르면 어떻게 할지')}
             </div>
+            <div id="cuecard_pending" class="cuecard-pending" style="display:none"></div>
             <div class="cuecard-actions">
                 <input id="cuecard_direction" class="text_pole" type="text"
                     placeholder="추가 요청 (선택) 예: 탈출하는 쪽으로">
                 <div id="cuecard_go" class="menu_button">쪽지 받기</div>
+                <div id="cuecard_pin_btn" class="menu_button fa-solid fa-thumbtack" title="쪽지 보관함"></div>
                 <div id="cuecard_char_btn" class="menu_button fa-solid fa-address-card" title="캐릭터 요약"></div>
                 <div id="cuecard_note_btn" class="menu_button fa-solid fa-pen" title="이 채팅방의 내 캐릭터 메모"></div>
                 <div id="cuecard_view_prompt" class="menu_button fa-solid fa-eye" title="보낸 프롬프트 보기"></div>
@@ -238,6 +324,10 @@
                 <textarea id="cuecard_note" class="text_pole" rows="3"
                     placeholder="예: 겉으론 무뚝뚝하지만 속으로 걱정 많음. 반말 씀. 위험하면 먼저 나서는 편."></textarea>
             </div>
+            <div id="cuecard_pin_box" class="cuecard-box" style="display:none">
+                <div class="cuecard-note-title">📌 쪽지 보관함 <small>(이 채팅방, 턴이 지나도 유지)</small></div>
+                <div id="cuecard_pin_list"></div>
+            </div>
             <div id="cuecard_results"></div>
            </div>
           </div>
@@ -250,16 +340,44 @@
         $(`#cuecard_panel .cuecard-chip[data-mood="${st.lastMood}"]`).addClass('selected');
     }
 
-    const LANG_LABEL = { ko: '답변: 한글', en: '답변: EN', auto: '답변: 대화 따라' };
-    function refreshLangChip() {
-        $('#cuecard_lang_chip').text(LANG_LABEL[settings().language] || LANG_LABEL.ko);
+    function renderMoodChips() {
+        $('#cuecard_moods').html(allMoods().map(m =>
+            `<div class="cuecard-chip" data-mood="${escapeHtml(m.id)}">${escapeHtml(m.label)}</div>`).join('') +
+            '<div class="cuecard-chip" data-mood="random">🎲 랜덤</div>');
+        refreshChips();
+    }
+
+    function refreshCycleChips() {
+        const st = settings();
+        for (const [key, cfg] of Object.entries(CYCLES)) {
+            const label = cfg.labels[st[key]] || Object.values(cfg.labels)[0];
+            $(`#cuecard_panel .cuecard-cycle[data-key="${key}"]`).text(label)
+                .toggleClass('selected', key === 'ideaMode' ? st[key] === 'hidden'
+                    : key === 'language' ? false : st[key] !== Object.keys(cfg.labels)[0]);
+        }
+    }
+
+    function cycleSetting(key) {
+        const cfg = CYCLES[key];
+        if (!cfg) return;
+        const st = settings();
+        const order = Object.keys(cfg.labels);
+        st[key] = order[(order.indexOf(st[key]) + 1) % order.length];
+        save();
+        if (cfg.select) $(cfg.select).val(st[key]);
+        refreshCycleChips();
     }
 
     function togglePanel(force) {
         const $p = $('#cuecard_panel');
         const show = force ?? !$p.is(':visible');
         $p.toggle(show);
-        if (show) { refreshChips(); refreshLangChip(); if (!busy) showStored(); }
+        if (show) { refreshChips(); refreshCycleChips(); refreshPending(); refreshPins(); if (!busy) showStored(); }
+    }
+
+    function scrollPanelTop() {
+        const body = $('#cuecard_panel .cuecard-body')[0];
+        if (body) body.scrollTop = 0;
     }
 
     function setStatus(html) { $('#cuecard_results').html(`<div class="cuecard-status">${html}</div>`); }
@@ -319,6 +437,109 @@
         const note = getNote();
         $('#cuecard_note').val(note);
         $('#cuecard_note_btn').toggleClass('cuecard-has-note', !!note.trim());
+    }
+
+    // ---------- 쪽지 보관함 (채팅방별) ----------
+    function saveMeta() {
+        const c = ctx();
+        (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
+    }
+    function getPins() {
+        const pins = ctx().chatMetadata?.[PIN_KEY];
+        return Array.isArray(pins) ? pins : [];
+    }
+    function isPinned(type, text) {
+        return getPins().some(p => p.type === type && p.text === text);
+    }
+    function togglePin(type, text) {
+        const c = ctx();
+        if (!c.chatMetadata) return;
+        const pins = getPins();
+        const i = pins.findIndex(p => p.type === type && p.text === text);
+        if (i >= 0) pins.splice(i, 1);
+        else pins.push({ type, text });
+        c.chatMetadata[PIN_KEY] = pins;
+        saveMeta();
+        refreshPins();
+        const stored = loadStored();
+        if (stored && !busy) renderResults(stored);
+    }
+    function removePin(i) {
+        const c = ctx();
+        const pins = getPins();
+        if (!c.chatMetadata || !pins[i]) return;
+        pins.splice(i, 1);
+        c.chatMetadata[PIN_KEY] = pins;
+        saveMeta();
+        refreshPins();
+        const stored = loadStored();
+        if (stored && !busy) renderResults(stored);
+    }
+    function refreshPins() {
+        const pins = getPins();
+        $('#cuecard_pin_btn').toggleClass('cuecard-has-note', pins.length > 0);
+        $('#cuecard_pin_list').html(pins.length
+            ? pins.map((p, i) => `
+                <div class="cuecard-card cuecard-pinned${p.type === 'idea' ? ' idea' : ''}" data-pin="${i}">
+                    <div class="cuecard-card-text">${p.type === 'idea' ? '🎬 ' : '💬 '}${escapeHtml(p.text)}</div>
+                    <div class="cuecard-tools">
+                        <span class="cuecard-tool cuecard-unpin fa-solid fa-xmark" data-pin="${i}" title="보관함에서 빼기"></span>
+                    </div>
+                </div>`).join('')
+            : '<small class="cuecard-empty">쪽지의 📌 압정을 누르면 여기 모여요.</small>');
+    }
+
+    // ---------- 전개 쪽지 몰래 반영 (작가 노트처럼) ----------
+    function getPending() {
+        return ctx().chatMetadata?.[PENDING_KEY] || null;
+    }
+    function applyPending() {
+        const c = ctx();
+        if (typeof c.setExtensionPrompt !== 'function') return false;
+        const p = getPending();
+        const text = p ? `[Story direction for the next reply only — weave this in naturally and never mention this note: ${p.text}]` : '';
+        c.setExtensionPrompt(EXT_PROMPT_KEY, text,
+            c.extension_prompt_types?.IN_CHAT ?? 1, 1, false, c.extension_prompt_roles?.SYSTEM ?? 0);
+        return true;
+    }
+    function setPending(text) {
+        const c = ctx();
+        if (typeof c.setExtensionPrompt !== 'function' || !c.chatMetadata) return false;
+        c.chatMetadata[PENDING_KEY] = { text, armed: false };
+        saveMeta();
+        applyPending();
+        refreshPending();
+        return true;
+    }
+    function clearPending() {
+        const c = ctx();
+        if (c.chatMetadata?.[PENDING_KEY]) {
+            delete c.chatMetadata[PENDING_KEY];
+            saveMeta();
+        }
+        applyPending();
+        refreshPending();
+    }
+    function refreshPending() {
+        const p = getPending();
+        $('#cuecard_pending').html(p
+            ? `<span>🤫 다음 답변에 몰래 반영: ${escapeHtml(p.text)}</span><span class="cuecard-pending-x fa-solid fa-xmark" title="반영 취소"></span>`
+            : '').toggle(!!p);
+        $('#cuecard_button').toggleClass('cuecard-has-pending', !!p);
+    }
+
+    function useNote(type, text) {
+        if (type === 'idea' && settings().ideaMode === 'hidden') {
+            if (setPending(text)) {
+                toastr.success('다음 답변에 몰래 반영할게요. 평소처럼 메시지를 보내세요.', 'Crib Note');
+            } else {
+                insertText(`(OOC: ${text})`);
+                toastr.warning('이 실리태번 버전에선 몰래 반영을 쓸 수 없어서 OOC로 넣었어요.', 'Crib Note');
+            }
+        } else {
+            insertText(type === 'idea' ? `(OOC: ${text})` : text);
+        }
+        if (settings().autoClose) togglePanel(false);
     }
 
     // ---------- 캐릭터 요약 ----------
@@ -436,22 +657,32 @@ Output only the summary.` },
         }
     }
 
-    function renderResults(data) {
+    function cardHtml(type, t, i, used, loading) {
+        const u = used[type]?.includes(i) ? ' used' : '';
+        const busyCls = loading && loading.type === type && loading.idx === i ? ' loading' : '';
+        const pin = isPinned(type, t) ? ' pinned' : '';
+        const text = busyCls ? '<i class="fa-solid fa-spinner fa-spin"></i> 고쳐 쓰는 중…' : escapeHtml(t);
+        return `<div class="cuecard-card${type === 'idea' ? ' idea' : ''}${u}${busyCls}" data-type="${type}" data-idx="${i}">
+            <div class="cuecard-card-text">${text}</div>
+            <div class="cuecard-tools">
+                <span class="cuecard-tool fa-solid fa-thumbtack${pin}" data-act="pin" title="보관함에 고정"></span>
+                <span class="cuecard-tool fa-solid fa-rotate" data-act="again" title="이 쪽지만 다시"></span>
+                <span class="cuecard-tool fa-solid fa-scissors" data-act="shorter" title="더 짧게"></span>
+                <span class="cuecard-tool fa-solid fa-fire" data-act="bolder" title="더 대담하게"></span>
+            </div>
+        </div>`;
+    }
+
+    function renderResults(data, loading = null) {
         const used = data.used || { reply: [], idea: [] };
         let html = `<div class="cuecard-moodtag">분위기: ${escapeHtml(data.moodLabel || '')}</div>`;
         if (data.replies.length) {
             html += '<div class="cuecard-section">💬 대사 쪽지</div>';
-            data.replies.forEach((t, i) => {
-                const u = used.reply.includes(i) ? ' used' : '';
-                html += `<div class="cuecard-card${u}" data-type="reply" data-idx="${i}" data-text="${escapeHtml(t)}">${escapeHtml(t)}</div>`;
-            });
+            data.replies.forEach((t, i) => { html += cardHtml('reply', t, i, used, loading); });
         }
         if (data.ideas.length) {
             html += '<div class="cuecard-section">🎬 전개 쪽지</div>';
-            data.ideas.forEach((t, i) => {
-                const u = used.idea.includes(i) ? ' used' : '';
-                html += `<div class="cuecard-card idea${u}" data-type="idea" data-idx="${i}" data-text="${escapeHtml(t)}">${escapeHtml(t)}</div>`;
-            });
+            data.ideas.forEach((t, i) => { html += cardHtml('idea', t, i, used, loading); });
         }
         if (!data.replies.length && !data.ideas.length) {
             html += '<div class="cuecard-status">쪽지가 번져서 못 읽었어요. 한 장 더 받아볼까요?</div>';
@@ -499,15 +730,22 @@ Output only the summary.` },
 
     function pickMood() {
         const st = settings();
-        if (st.lastMood !== 'random') return MOODS.find(m => m.id === st.lastMood) || MOODS[0];
-        const pool = MOODS.filter(m => st.randomMoods.includes(m.id));
+        const moods = allMoods();
+        if (st.lastMood !== 'random') return moods.find(m => m.id === st.lastMood) || MOODS[0];
+        const pool = moods.filter(m => st.randomMoods.includes(m.id));
         const list = pool.length ? pool : MOODS;
         return list[Math.floor(Math.random() * list.length)];
     }
 
-    function buildMessages(mood, direction) {
+    function moodText(mood) {
+        if (MOODS.some(m => m.id === mood.id)) return mood.desc;
+        return mood.desc ? `${mood.label} — ${mood.desc}` : mood.label;
+    }
+
+    function buildMessages(mood, direction, opts = {}) {
         const c = ctx();
         const st = settings();
+        const counts = opts.counts || { replyCount: st.replyCount, ideaCount: st.ideaCount };
         const sub = (t) => (c.substituteParams ? c.substituteParams(t) : t);
         const userName = c.name1 || 'User';
         const charName = c.name2 || 'Character';
@@ -557,17 +795,27 @@ Output only the summary.` },
         const replyLang = langName(st.language);
         const ideaLang = langName(st.ideaLanguage);
 
+        const lengthRule = {
+            short: 'Keep each one very short: 1-2 brief sentences.',
+            long: 'Make each one richer: about 4-7 sentences with more action, feeling and detail.',
+        }[st.lastLength] || 'Keep each 1-4 sentences.';
+        const formRule = {
+            dialogue: `Write ONLY spoken lines of ${userName} — no narration, no action descriptions.`,
+            action: `Write ONLY ${userName}'s actions, gestures and expressions as narration — no spoken dialogue at all.`,
+        }[st.lastForm] || `Mix dialogue and actions freely.`;
+
         const tasks = [];
-        if (st.replyCount > 0) {
-            tasks.push(`- "replies": exactly ${st.replyCount} different candidate messages that ${userName} could send next. ` +
+        if (counts.replyCount > 0) {
+            tasks.push(`- "replies": exactly ${counts.replyCount} different candidate messages that ${userName} could send next. ` +
                 `Write ONLY ${userName}'s own dialogue and actions, in ${userName}'s voice and personality. ` +
                 `Never decide ${charName}'s reactions or other characters' actions. ` +
                 `Match the formatting style of the recent chat (quotes for speech, asterisks for actions, etc.). ` +
-                `Make each candidate meaningfully different in approach. Keep each 1-4 sentences. ` +
+                `${formRule} ` +
+                `Make each candidate meaningfully different in approach. ${lengthRule} ` +
                 `Write the replies in ${replyLang}.`);
         }
-        if (st.ideaCount > 0) {
-            tasks.push(`- "ideas": exactly ${st.ideaCount} short story-development ideas (one sentence each) for what could happen next ` +
+        if (counts.ideaCount > 0) {
+            tasks.push(`- "ideas": exactly ${counts.ideaCount} short story-development ideas (one sentence each) for what could happen next ` +
                 `— an event, a new arrival, a change in the environment, a discovery, etc. ` +
                 `Write them as neutral director's notes, not as dialogue. Write the ideas in ${ideaLang}.`);
         }
@@ -580,7 +828,7 @@ Read the context and suggest how the story could continue from the latest messag
 Produce:
 ${tasks.join('\n')}
 
-Desired mood: ${mood.desc}.${direction ? `\nAdditional request from the user: ${direction}` : ''}
+Desired mood: ${moodText(mood)}.${direction ? `\nAdditional request from the user: ${direction}` : ''}${opts.rewrite ? `\n${opts.rewrite}` : ''}
 Stay consistent with established facts, characters and setting. Do not repeat things that already happened.
 For "replies", follow ${userName}'s own writing style shown in <user_style_reference> if present.
 The chat may contain status windows, info boxes, dates/locations headers, trackers, HTML or code blocks. These are UI decorations — NEVER imitate or include them. Write only plain story text.
@@ -701,8 +949,14 @@ Output ONLY valid JSON, no explanations, no code fences:
             : '요청을 중단하는 중…');
     }
 
-    async function generate() {
-        if (busy) { cancel(); return; }
+    const REWRITES = {
+        again: (t) => `Write ONE fresh alternative that takes a clearly different approach from this one: "${t}"`,
+        shorter: (t) => `Rewrite this ONE suggestion as a noticeably shorter, punchier version that keeps its intent: "${t}"`,
+        bolder: (t) => `Rewrite this ONE suggestion to be bolder and more daring or dramatic, while staying in character: "${t}"`,
+    };
+
+    async function generate(single = null) {
+        if (busy) { if (!single) cancel(); return; }
         if (summarizing) { toastr.info('캐릭터 요약이 끝난 뒤 다시 눌러주세요.', 'Crib Note'); return; }
         const c = ctx();
         if (!c.chat || !c.chat.length) {
@@ -710,7 +964,11 @@ Output ONLY valid JSON, no explanations, no code fences:
             return;
         }
         const st = settings();
-        if (st.replyCount <= 0 && st.ideaCount <= 0) {
+        let base = null;
+        if (single) {
+            base = loadStored();
+            if (!base) { showStored(); return; }
+        } else if (st.replyCount <= 0 && st.ideaCount <= 0) {
             toastr.warning('설정에서 답변 후보나 전개 아이디어 개수를 1 이상으로 해주세요.', 'Crib Note');
             return;
         }
@@ -722,15 +980,19 @@ Output ONLY valid JSON, no explanations, no code fences:
         cancelMode = 'request';
         const sourceTurn = currentTurnKey();
         const sourceMetadata = c.chatMetadata;
-        const counts = { replyCount: st.replyCount, ideaCount: st.ideaCount };
+        const counts = single
+            ? { replyCount: single.type === 'reply' ? 1 : 0, ideaCount: single.type === 'idea' ? 1 : 0 }
+            : { replyCount: st.replyCount, ideaCount: st.ideaCount };
         setGoButton('busy');
-        const mood = pickMood();
-        const moodLabel = st.lastMood === 'random' ? `🎲 → ${mood.label}` : mood.label;
-        setStatus(`<i class="fa-solid fa-spinner fa-spin"></i> 몰래 쪽지 쓰는 중… (${escapeHtml(moodLabel)})`);
+        const mood = (single && allMoods().find(m => m.id === base.moodId)) || pickMood();
+        const moodLabel = single ? base.moodLabel : (st.lastMood === 'random' ? `🎲 → ${mood.label}` : mood.label);
+        if (single) renderResults(base, single);
+        else setStatus(`<i class="fa-solid fa-spinner fa-spin"></i> 몰래 쪽지 쓰는 중… (${escapeHtml(moodLabel)})`);
 
         try {
             const direction = String($('#cuecard_direction').val() || '').trim();
-            const messages = buildMessages(mood, direction);
+            const rewrite = single ? (REWRITES[single.variant] || REWRITES.again)(single.oldText) : '';
+            const messages = buildMessages(mood, direction, { counts, rewrite });
             lastSent = { messages, moodLabel, profile: st.profileId, time: new Date() };
             const raw = await requestLLM(messages, {
                 signal: controller.signal,
@@ -743,13 +1005,33 @@ Output ONLY valid JSON, no explanations, no code fences:
                 cancel();
                 return;
             }
-            const data = { ...parseResult(raw, counts), moodLabel, turnKey: sourceTurn, used: { reply: [], idea: [] } };
+            const parsed = parseResult(raw, counts);
+            if (single) {
+                const cur = loadStored();
+                if (!cur) { showStored(); return; }
+                const list = single.type === 'idea' ? cur.ideas : cur.replies;
+                const fresh = (single.type === 'idea' ? parsed.ideas : parsed.replies)[0];
+                if (fresh && list[single.idx] !== undefined) {
+                    list[single.idx] = fresh;
+                    cur.used[single.type] = (cur.used[single.type] || []).filter(i => i !== single.idx);
+                    storeResult(cur);
+                }
+                renderResults(cur);
+                return;
+            }
+            const data = { ...parsed, moodLabel, moodId: mood.id, turnKey: sourceTurn, used: { reply: [], idea: [] } };
             storeResult(data);
             renderResults(data);
         } catch (err) {
             if (myRun !== runId) return;
             console.error('[Crib Note]', err);
-            setStatus(`⚠️ 추천을 만들지 못했어요: ${escapeHtml(err?.message || err)}`);
+            if (single) {
+                const cur = loadStored();
+                if (cur) renderResults(cur); else showStored();
+                toastr.warning(`쪽지를 고쳐 쓰지 못했어요: ${err?.message || err}`, 'Crib Note');
+            } else {
+                setStatus(`⚠️ 추천을 만들지 못했어요: ${escapeHtml(err?.message || err)}`);
+            }
         } finally {
             if (abortCtl === controller) {
                 busy = false;
@@ -807,6 +1089,8 @@ Output ONLY valid JSON, no explanations, no code fences:
         bindSettings();
 
         $('#send_form').before(buildPanel());
+        renderMoodChips();
+        refreshCycleChips();
         const icon = `<div id="cuecard_button" class="interactable" title="Crib Note: 몰래 쪽지 받기" tabindex="0">
             ${ICON_SVG}
         </div>`;
@@ -829,12 +1113,23 @@ Output ONLY valid JSON, no explanations, no code fences:
             }
             refreshNote();
             $('#cuecard_char_box').hide();
+            $('#cuecard_pin_box').hide();
             $('#cuecard_note_box').toggle();
+            scrollPanelTop();
         });
         $('#cuecard_char_btn').on('click', () => {
             refreshCharBox();
             $('#cuecard_note_box').hide();
+            $('#cuecard_pin_box').hide();
             $('#cuecard_char_box').toggle();
+            scrollPanelTop();
+        });
+        $('#cuecard_pin_btn').on('click', () => {
+            refreshPins();
+            $('#cuecard_note_box').hide();
+            $('#cuecard_char_box').hide();
+            $('#cuecard_pin_box').toggle();
+            scrollPanelTop();
         });
         $('#cuecard_char_make').on('click', makeSummary);
         $('#cuecard_char_clear').on('click', () => {
@@ -853,17 +1148,38 @@ Output ONLY valid JSON, no explanations, no code fences:
             setNote($(this).val());
             $('#cuecard_note_btn').toggleClass('cuecard-has-note', !!String($(this).val()).trim());
         });
-        $('#cuecard_go').on('click', generate);
+        $('#cuecard_go').on('click', () => generate());
         $('#cuecard_direction').on('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); generate(); } });
 
-        $('#cuecard_panel').on('click', '#cuecard_lang_chip', function (e) {
+        $('#cuecard_panel').on('click', '.cuecard-cycle', function () {
+            cycleSetting(String($(this).data('key')));
+        });
+        $('#cuecard_panel').on('click', '.cuecard-pending-x', () => clearPending());
+
+        // 쪽지 도구: 고정 / 다시 / 짧게 / 대담하게
+        $('#cuecard_panel').on('click', '.cuecard-tool[data-act]', function (e) {
             e.stopPropagation();
-            const order = ['ko', 'en', 'auto'];
-            const st = settings();
-            st.language = order[(order.indexOf(st.language) + 1) % order.length];
-            save();
-            refreshLangChip();
-            $('#cuecard_language').val(st.language);
+            const $card = $(this).closest('.cuecard-card');
+            const type = $card.data('type');
+            const idx = Number($card.data('idx'));
+            const act = String($(this).data('act'));
+            const stored = loadStored();
+            if (!stored) { showStored(); return; }
+            const text = (type === 'idea' ? stored.ideas : stored.replies)?.[idx];
+            if (typeof text !== 'string') return;
+            if (act === 'pin') { togglePin(type, text); return; }
+            if (busy) { toastr.info('지금 쪽지를 쓰는 중이에요. 끝난 뒤 다시 눌러주세요.', 'Crib Note'); return; }
+            generate({ type, idx, variant: act, oldText: text });
+        });
+
+        // 보관함
+        $('#cuecard_panel').on('click', '.cuecard-unpin', function (e) {
+            e.stopPropagation();
+            removePin(Number($(this).data('pin')));
+        });
+        $('#cuecard_panel').on('click', '.cuecard-pinned', function () {
+            const p = getPins()[Number($(this).data('pin'))];
+            if (p) useNote(p.type, p.text);
         });
 
         $('#cuecard_panel').on('click', '.cuecard-chip[data-mood]', function () {
@@ -873,14 +1189,14 @@ Output ONLY valid JSON, no explanations, no code fences:
         });
 
         $('#cuecard_panel').on('click', '.cuecard-card', function () {
+            if ($(this).data('pin') !== undefined) return;   // 보관함 쪽지는 따로 처리
             const stored = loadStored();
             if (!stored) { showStored(); return; }
             const type = $(this).data('type');
             const idx = Number($(this).data('idx'));
             const text = (type === 'idea' ? stored.ideas : stored.replies)?.[idx];
             if (typeof text !== 'string') return;
-            insertText(type === 'idea' ? `(OOC: ${text})` : text);
-            if (settings().autoClose) togglePanel(false);
+            useNote(type, text);
             $(this).addClass('used');
             if (stored.used?.[type] && !stored.used[type].includes(idx)) {
                 stored.used[type].push(idx);
@@ -895,19 +1211,36 @@ Output ONLY valid JSON, no explanations, no code fences:
         for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_DELETED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], expireResults);
         }
+        // 몰래 반영: 본편 생성이 시작되면 '사용됨' 표시 → 답이 오면 정리
+        if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, (type, _opts, dryRun) => {
+            const p = getPending();
+            if (!p || dryRun || type === 'quiet' || p.armed) return;
+            p.armed = true;
+            saveMeta();
+        });
+        if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => {
+            if (getPending()?.armed) clearPending();
+        });
         c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
             if (busy) cancel();
             lastSent = null;
             $('#cuecard_direction').val('');
             $('#cuecard_note_box').hide();
             $('#cuecard_char_box').hide();
+            $('#cuecard_pin_box').hide();
             refreshNote();
             refreshCharBox();
+            refreshPins();
+            applyPending();
+            refreshPending();
             showStored();
             if (busy) $('#cuecard_go').addClass('cuecard-cancel').text('취소 중…');
         });
         refreshNote();
         refreshCharBox();
+        refreshPins();
+        applyPending();
+        refreshPending();
         showStored();
 
         console.log('[Crib Note] loaded');

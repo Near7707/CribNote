@@ -8,6 +8,8 @@ const original = readFileSync(join(__dirname, '..', 'index.js'), 'utf8');
 const source = original.replace('jQuery(() => init());', `globalThis.api = {
     settings, bindSettings, parseResult, cleanMessage, requestLLM, generate, cancel, init, makeSummary,
     currentTurnKey, loadStored, showStored, togglePanel,
+    addCustomMood, removeCustomMood, allMoods, pickMood, buildMessages, cycleSetting,
+    togglePin, getPins, useNote, getPending,
     state: () => ({ busy, summarizing }),
 };`);
 
@@ -54,6 +56,7 @@ function setup(overrides = {}) {
             CONNECTION_PROFILE_UPDATED: 'updated', CONNECTION_PROFILE_DELETED: 'deleted',
             MESSAGE_SENT: 'sent', MESSAGE_RECEIVED: 'received', MESSAGE_SWIPED: 'swiped',
             MESSAGE_EDITED: 'edited', MESSAGE_DELETED: 'message_deleted',
+            GENERATION_STARTED: 'gen_started',
         },
         eventSource: { on(name, fn) { if (!events.has(name)) events.set(name, []); events.get(name).push(fn); } },
         ...overrides,
@@ -339,4 +342,119 @@ test('late responses and stale clicks are rejected even if a chat event was miss
     h.elements.get('#cuecard_panel').el.handlers.get('click:.cuecard-card').call(card);
     assert.equal(h.$('#send_textarea').val(), '');
     assert.equal(h.context.chatMetadata.cuecard, undefined);
+});
+
+const fire = (h, name, ...args) => { for (const handler of h.events.get(name) || []) handler(...args); };
+
+test('custom moods join chips, random pool and prompt; deleting resets the selection', () => {
+    const h = setup(); h.api.init();
+    h.$('#cuecard_custom_label').val('도깨비 장난');
+    h.$('#cuecard_custom_desc').val('도깨비가 몰래 장난을 쳐서 일이 꼬임');
+    h.api.addCustomMood();
+    const mood = h.api.allMoods().at(-1);
+    assert.equal(mood.label, '도깨비 장난');
+    assert.ok(h.api.settings().randomMoods.includes(mood.id));
+    assert.match(h.$('#cuecard_moods').html(), /도깨비 장난/);
+    h.api.settings().lastMood = mood.id;
+    assert.equal(h.api.pickMood().id, mood.id);
+    const system = h.api.buildMessages(mood, '')[0].content;
+    assert.match(system, /도깨비 장난 — 도깨비가 몰래 장난을 쳐서 일이 꼬임/);
+    h.$('#cuecard_custom_label').val('도깨비 장난'); h.api.addCustomMood();
+    assert.equal(h.api.settings().customMoods.length, 1);
+    h.api.removeCustomMood(mood.id);
+    assert.equal(h.api.settings().lastMood, 'normal');
+    assert.equal(h.api.settings().randomMoods.includes(mood.id), false);
+});
+
+test('length and form chips cycle and change the reply instructions', () => {
+    const h = setup(); h.api.init();
+    const mood = h.api.allMoods()[0];
+    assert.match(h.api.buildMessages(mood, '')[0].content, /Keep each 1-4 sentences/);
+    h.api.cycleSetting('lastLength'); assert.equal(h.api.settings().lastLength, 'short');
+    h.api.cycleSetting('lastForm'); assert.equal(h.api.settings().lastForm, 'dialogue');
+    const system = h.api.buildMessages(mood, '')[0].content;
+    assert.match(system, /very short/); assert.match(system, /ONLY spoken lines/);
+    h.api.cycleSetting('lastLength'); h.api.cycleSetting('lastForm');
+    const next = h.api.buildMessages(mood, '')[0].content;
+    assert.match(next, /4-7 sentences/); assert.match(next, /no spoken dialogue/);
+    h.api.cycleSetting('ideaMode'); assert.equal(h.api.settings().ideaMode, 'hidden');
+});
+
+test('one note can be rewritten alone while the others stay', async () => {
+    const calls = [];
+    const h = setup({ generateRaw: async (data) => {
+        calls.push(data.systemPrompt);
+        return calls.length === 1 ? result : '{"replies":["짧은 둘"]}';
+    } });
+    h.api.init(); await h.api.generate();
+    h.context.chatMetadata.cuecard.used.reply.push(1);
+    await h.api.generate({ type: 'reply', idx: 1, variant: 'shorter', oldText: '둘' });
+    const saved = h.context.chatMetadata.cuecard;
+    assert.deepEqual(json(saved.replies), ['하나', '짧은 둘']);
+    assert.deepEqual(json(saved.ideas), ['새 손님이 온다.']);
+    assert.equal(saved.used.reply.includes(1), false);
+    assert.match(calls[1], /exactly 1 different candidate/);
+    assert.match(calls[1], /shorter, punchier version .*"둘"/);
+    assert.doesNotMatch(calls[1], /"ideas": exactly/);
+    assert.equal(h.api.state().busy, false);
+});
+
+test('a failed rewrite keeps the original note', async () => {
+    let n = 0;
+    const h = setup({ generateRaw: async () => (++n === 1 ? result : 'broken') });
+    h.api.init(); await h.api.generate();
+    await h.api.generate({ type: 'idea', idx: 0, variant: 'again', oldText: '새 손님이 온다.' });
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.ideas), ['새 손님이 온다.']);
+    assert.match(h.$('#cuecard_results').html(), /새 손님이 온다/);
+});
+
+test('pinned notes survive the turn and can be removed', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    h.api.togglePin('reply', '하나'); h.api.togglePin('idea', '새 손님이 온다.');
+    assert.equal(h.api.getPins().length, 2);
+    assert.match(h.$('#cuecard_results').html(), /fa-thumbtack pinned/);
+    h.context.chat.push({ name: 'User', is_user: true, mes: '보냄' }); fire(h, 'sent');
+    assert.equal(h.context.chatMetadata.cuecard, undefined);
+    assert.equal(h.api.getPins().length, 2);
+    assert.match(h.$('#cuecard_pin_list').html(), /하나/);
+    h.api.togglePin('reply', '하나');
+    assert.deepEqual(json(h.api.getPins()), [{ type: 'idea', text: '새 손님이 온다.' }]);
+});
+
+test('hidden idea mode injects once, keeps the input clean and clears after the reply', async () => {
+    const prompts = [];
+    const h = setup({ generateRaw: async () => result,
+        setExtensionPrompt: (...a) => prompts.push(a) });
+    h.api.init(); await h.api.generate();
+    h.api.settings().ideaMode = 'hidden';
+    h.$('#send_textarea').val('내 대사');
+    h.api.useNote('idea', '새 손님이 온다.');
+    assert.equal(h.$('#send_textarea').val(), '내 대사');
+    assert.match(prompts.at(-1)[1], /새 손님이 온다/);
+    assert.equal(prompts.at(-1)[0], 'cribnote_direction');
+    // 생성 전에 끝난 답(예: 이미 진행 중이던 답)은 지우지 않아요
+    fire(h, 'received');
+    assert.equal(h.api.getPending().text, '새 손님이 온다.');
+    fire(h, 'gen_started', 'quiet', {}, false);
+    fire(h, 'gen_started', 'normal', {}, true);
+    fire(h, 'received');
+    assert.ok(h.api.getPending());
+    fire(h, 'gen_started', 'normal', {}, false);
+    fire(h, 'received');
+    assert.equal(h.api.getPending(), null);
+    assert.equal(prompts.at(-1)[1], '');
+});
+
+test('hidden idea mode falls back to OOC when the API is missing', () => {
+    const h = setup(); h.api.init();
+    h.api.settings().ideaMode = 'hidden';
+    h.api.useNote('idea', '비가 온다.');
+    assert.equal(h.$('#send_textarea').val(), '(OOC: 비가 온다.)');
+    assert.equal(h.api.getPending(), null);
+});
+
+test('the main button starts a full request even though jQuery passes an event object', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init();
+    await h.elements.get('#cuecard_go').el.handlers.get('click')({ type: 'click', target: {} });
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
 });
