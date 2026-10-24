@@ -1,4 +1,4 @@
-// Crib Note v0.9.0 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.1 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -493,21 +493,45 @@
     function getPending() {
         return ctx().chatMetadata?.[PENDING_KEY] || null;
     }
-    function applyPending() {
+    // 실리태번 프롬프트에 지시를 붙이거나('' 이면) 떼요.
+    // 고르는 순간이 아니라, 본편 답변을 만들기 시작할 때만 붙여요.
+    function setDirectionPrompt(text) {
         const c = ctx();
         if (typeof c.setExtensionPrompt !== 'function') return false;
-        const p = getPending();
-        const text = p ? `[Story direction for the next reply only — weave this in naturally and never mention this note: ${p.text}]` : '';
-        c.setExtensionPrompt(EXT_PROMPT_KEY, text,
+        c.setExtensionPrompt(EXT_PROMPT_KEY,
+            text ? `[Story direction for this reply only — weave this in naturally and never mention this note: ${text}]` : '',
             c.extension_prompt_types?.IN_CHAT ?? 1, 1, false, c.extension_prompt_roles?.SYSTEM ?? 0);
         return true;
+    }
+    // 본편 답변: 일반 전송·재생성·스와이프·이어쓰기. 대사 대신 쓰기(impersonate)·quiet 등은 제외.
+    const MAIN_GEN_TYPES = ['normal', 'regenerate', 'swipe', 'continue'];
+    function isMainGeneration(type) {
+        return !type || MAIN_GEN_TYPES.includes(type);
+    }
+    function onGenerationStarted(type, _opts, dryRun) {
+        const p = getPending();
+        if (p && !dryRun && isMainGeneration(type)) {
+            setDirectionPrompt(p.text);
+            if (!p.armed) { p.armed = true; saveMeta(); }
+        } else {
+            setDirectionPrompt('');
+        }
+    }
+    function onGenerationEnded() {
+        // 지시는 매 생성마다 다시 붙이니까 끝나면 일단 떼요. 쪽지 정리는 MESSAGE_RECEIVED에서 해요.
+        setDirectionPrompt('');
+    }
+    function onGenerationStopped() {
+        // 중간에 멈추면 지시만 떼고 쪽지는 다음 답변을 위해 남겨둬요.
+        setDirectionPrompt('');
+        const p = getPending();
+        if (p?.armed) { p.armed = false; saveMeta(); }
     }
     function setPending(text) {
         const c = ctx();
         if (typeof c.setExtensionPrompt !== 'function' || !c.chatMetadata) return false;
         c.chatMetadata[PENDING_KEY] = { text, armed: false };
         saveMeta();
-        applyPending();
         refreshPending();
         return true;
     }
@@ -517,7 +541,14 @@
             delete c.chatMetadata[PENDING_KEY];
             saveMeta();
         }
-        applyPending();
+        setDirectionPrompt('');
+        refreshPending();
+    }
+    function resetPendingForChat() {
+        // 다른 채팅방 지시가 남지 않게 떼고, 이전 세션에서 '사용 중'으로 남은 표시는 풀어요.
+        setDirectionPrompt('');
+        const p = getPending();
+        if (p?.armed) { p.armed = false; saveMeta(); }
         refreshPending();
     }
     function refreshPending() {
@@ -548,9 +579,15 @@
         if (c.groupId || c.characterId === undefined) return null;
         return c.characters?.[c.characterId] || null;
     }
-    function charRaw(ch) {
+    // {{user}}는 그대로 두고 나머지 매크로만 바꿔요. 페르소나가 바뀌어도 요약을 그대로 쓸 수 있게요.
+    function subKeepUser(t) {
         const c = ctx();
-        const sub = (t) => (c.substituteParams ? c.substituteParams(t) : t);
+        const marked = String(t || '').replace(/\{\{user\}\}|<USER>/gi, '\u0001');
+        const out = c.substituteParams ? c.substituteParams(marked) : marked;
+        return String(out).replace(/\u0001/g, '{{user}}');
+    }
+    function charRaw(ch) {
+        const sub = subKeepUser;
         const parts = [];
         if (ch.description) parts.push(`Description:\n${sub(ch.description)}`);
         if (ch.personality) parts.push(`Personality:\n${sub(ch.personality)}`);
@@ -574,6 +611,7 @@
                 text,
                 hash: hash ?? old.hash ?? hashStr(charRaw(ch)),
                 date: hash ? new Date().toISOString() : (old.date || new Date().toISOString()),
+                v: hash ? 2 : (old.v ?? (Object.keys(old).length ? undefined : 2)),
             };
         } else {
             delete st.charSummaries[ch.avatar];
@@ -599,11 +637,15 @@
             $('#cuecard_char_make').text('요약 만들기');
             return;
         }
-        const changed = sum.hash !== hashStr(charRaw(ch));
+        const legacy = sum.v !== 2;
+        const changed = !legacy && sum.hash !== hashStr(charRaw(ch));
         const d = new Date(sum.date);
         const when = isNaN(d) ? '' : ` (${d.getMonth() + 1}/${d.getDate()} 만듦)`;
-        $st.html(`${escapeHtml(ch.name)}: 요약 사용 중${when}` +
-            (changed ? ' <b class="cuecard-warn">· 카드가 바뀌었어요. 다시 만드는 걸 추천해요</b>' : ''));
+        const warn = legacy
+            ? ' <b class="cuecard-warn">· 이전 버전 요약이라 그때 쓰던 페르소나 이름이 들어 있을 수 있어요. 다시 만드는 걸 추천해요</b>'
+            : changed ? ' <b class="cuecard-warn">· 카드가 바뀌었어요. 다시 만드는 걸 추천해요</b>' : '';
+        $st.html(`${escapeHtml(ch.name)}: 요약 사용 중${when}${warn}` +
+            '<br><small>요약 속 {{user}}는 지금 페르소나 이름으로 바뀌어 들어가요.</small>');
         $('#cuecard_char_summary').val(sum.text);
         $('#cuecard_char_make').text('다시 만들기');
     }
@@ -619,7 +661,6 @@
         summarizing = true;
         $('#cuecard_char_make').text('요약 중…');
         $('#cuecard_char_status').html('<i class="fa-solid fa-spinner fa-spin"></i> 캐릭터 시트 읽는 중…');
-        const userName = ctx().name1 || 'User';
         const messages = [
             { role: 'system', content:
 `You condense a roleplay character sheet into a compact reference card.
@@ -627,9 +668,10 @@ Keep only what matters for writing believable story continuations:
 - identity (name, age/role, a few key appearance traits)
 - core personality and how it shows in behavior
 - speech style (tone, honorifics, verbal habits, sample phrasing if given)
-- relationship to ${userName} and other important people
+- relationship to {{user}} and other important people
 - key setting/world facts, goals, secrets or conflicts
 Drop decoration, repetition and minor trivia. Do not invent anything.
+{{user}} is a placeholder for whoever the user plays. Keep it written exactly as {{user}} — never replace it with a name.
 Write in the same language as the sheet. Use short bullet points under these headings. Aim for under 1500 characters.
 Output only the summary.` },
             { role: 'user', content: `<character name="${ch.name}">\n${clip(raw, 30000)}\n</character>` },
@@ -701,6 +743,13 @@ Output only the summary.` },
         s = String(s || '').trim();
         return s.length > n ? s.slice(0, n) + '…' : s;
     }
+    // 앞부분 조금 + 끝부분 많이. 마지막 질문·행동이 잘리지 않게요.
+    function clipEnds(s, n) {
+        s = String(s || '').trim();
+        if (s.length <= n) return s;
+        const head = Math.floor(n * 0.3);
+        return s.slice(0, head) + '\n…(중략)…\n' + s.slice(-(n - head));
+    }
 
     // 상태창·정보블록 걸러내기
     function cleanMessage(text) {
@@ -754,7 +803,7 @@ Output only the summary.` },
 
         const summary = st.useCharacter ? getSummary(currentChar()) : null;
         if (summary) {
-            blocks.push(`<character name="${currentChar().name}">\n${summary.text}\n</character>`);
+            blocks.push(`<character name="${currentChar().name}">\n${sub(summary.text)}\n</character>`);
         } else if (st.useCharacter && !c.groupId && c.characterId !== undefined && c.characters?.[c.characterId]) {
             const ch = c.characters[c.characterId];
             const parts = [];
@@ -778,9 +827,9 @@ Output only the summary.` },
 
         const prep = (mes) => cleanMessage(mes);
         const visible = (c.chat || []).filter(m => !m.is_system && m.mes);
-        const chat = visible
-            .slice(-st.contextMessages)
-            .map(m => `${m.name}: ${clip(prep(m.mes), 2500)}`)
+        const recent = visible.slice(-st.contextMessages);
+        const chat = recent
+            .map((m, i) => `${m.name}: ${clipEnds(prep(m.mes), i === recent.length - 1 ? 6000 : 2500)}`)
             .join('\n\n');
         blocks.push(`<recent_chat>\n${chat || '(no messages yet)'}\n</recent_chat>`);
 
@@ -886,9 +935,18 @@ Output ONLY valid JSON, no explanations, no code fences:
             const prompt = instruct?.enabled
                 ? tc.constructPrompt(messages, instruct)
                 : messages.map(m => m.content).join('\n\n');
-            const payload = tc.presetToGeneratePayload({}, {}, {
+            const payload = await tc.presetToGeneratePayload({}, {}, {
                 stream: false, prompt, max_tokens: maxTokens, max_new_tokens: maxTokens,
             });
+            // API마다 길이 필드 이름이 달라요 (KoboldCpp max_length, llama.cpp n_predict, Ollama num_predict).
+            // 이미 들어 있는 필드만 같은 값으로 맞춰요. 없는 필드를 새로 넣지는 않아요.
+            const LENGTH_KEYS = ['max_tokens', 'max_new_tokens', 'max_length', 'n_predict', 'num_predict'];
+            for (const target of [payload, payload?.options]) {
+                if (!target || typeof target !== 'object') continue;
+                for (const k of LENGTH_KEYS) {
+                    if (Object.prototype.hasOwnProperty.call(target, k)) target[k] = maxTokens;
+                }
+            }
             signal?.throwIfAborted();
             return content(await tc.sendRequest(payload, true, signal));
         }
@@ -1211,16 +1269,13 @@ Output ONLY valid JSON, no explanations, no code fences:
         for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_DELETED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], expireResults);
         }
-        // 몰래 반영: 본편 생성이 시작되면 '사용됨' 표시 → 답이 오면 정리
-        if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, (type, _opts, dryRun) => {
-            const p = getPending();
-            if (!p || dryRun || type === 'quiet' || p.armed) return;
-            p.armed = true;
-            saveMeta();
-        });
+        // 몰래 반영: 본편 답변 생성 때만 지시를 붙이고, 답이 오면 정리
+        if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, onGenerationStarted);
         if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => {
             if (getPending()?.armed) clearPending();
         });
+        if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, onGenerationEnded);
+        if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, onGenerationStopped);
         c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
             if (busy) cancel();
             lastSent = null;
@@ -1231,16 +1286,14 @@ Output ONLY valid JSON, no explanations, no code fences:
             refreshNote();
             refreshCharBox();
             refreshPins();
-            applyPending();
-            refreshPending();
+            resetPendingForChat();
             showStored();
             if (busy) $('#cuecard_go').addClass('cuecard-cancel').text('취소 중…');
         });
         refreshNote();
         refreshCharBox();
         refreshPins();
-        applyPending();
-        refreshPending();
+        resetPendingForChat();
         showStored();
 
         console.log('[Crib Note] loaded');

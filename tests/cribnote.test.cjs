@@ -56,7 +56,7 @@ function setup(overrides = {}) {
             CONNECTION_PROFILE_UPDATED: 'updated', CONNECTION_PROFILE_DELETED: 'deleted',
             MESSAGE_SENT: 'sent', MESSAGE_RECEIVED: 'received', MESSAGE_SWIPED: 'swiped',
             MESSAGE_EDITED: 'edited', MESSAGE_DELETED: 'message_deleted',
-            GENERATION_STARTED: 'gen_started',
+            GENERATION_STARTED: 'gen_started', GENERATION_STOPPED: 'gen_stopped', GENERATION_ENDED: 'gen_ended',
         },
         eventSource: { on(name, fn) { if (!events.has(name)) events.set(name, []); events.get(name).push(fn); } },
         ...overrides,
@@ -421,28 +421,106 @@ test('pinned notes survive the turn and can be removed', async () => {
     assert.deepEqual(json(h.api.getPins()), [{ type: 'idea', text: '새 손님이 온다.' }]);
 });
 
-test('hidden idea mode injects once, keeps the input clean and clears after the reply', async () => {
+test('hidden idea mode is attached only to the main reply and removed afterwards', async () => {
     const prompts = [];
     const h = setup({ generateRaw: async () => result,
         setExtensionPrompt: (...a) => prompts.push(a) });
     h.api.init(); await h.api.generate();
+    const last = () => prompts.at(-1)?.[1];
     h.api.settings().ideaMode = 'hidden';
     h.$('#send_textarea').val('내 대사');
     h.api.useNote('idea', '새 손님이 온다.');
     assert.equal(h.$('#send_textarea').val(), '내 대사');
-    assert.match(prompts.at(-1)[1], /새 손님이 온다/);
-    assert.equal(prompts.at(-1)[0], 'cribnote_direction');
-    // 생성 전에 끝난 답(예: 이미 진행 중이던 답)은 지우지 않아요
+    // 고르기만 해서는 프롬프트에 붙지 않아요
+    assert.ok(!last());
+    // 대사 대신 쓰기·quiet·dry run에서는 붙지 않고, 사용 처리도 안 돼요
+    for (const [type, dry] of [['impersonate', false], ['quiet', false], ['normal', true]]) {
+        fire(h, 'gen_started', type, {}, dry);
+        assert.equal(last(), '', type);
+        assert.equal(h.api.getPending().armed, false, type);
+    }
+    // 이미 진행 중이던 답이 끝나도 지우지 않아요
     fire(h, 'received');
     assert.equal(h.api.getPending().text, '새 손님이 온다.');
-    fire(h, 'gen_started', 'quiet', {}, false);
-    fire(h, 'gen_started', 'normal', {}, true);
-    fire(h, 'received');
-    assert.ok(h.api.getPending());
+    // 본편 답변 생성 때만 붙어요
     fire(h, 'gen_started', 'normal', {}, false);
+    assert.match(last(), /새 손님이 온다/);
+    assert.equal(prompts.at(-1)[0], 'cribnote_direction');
+    // 중단되면 지시는 떼고 쪽지는 남겨요
+    fire(h, 'gen_stopped');
+    assert.equal(last(), '');
+    assert.equal(h.api.getPending().armed, false);
+    // 다시 보내서 답이 오면 정리
+    fire(h, 'gen_started', undefined, {}, false);
+    assert.match(last(), /새 손님이 온다/);
+    // 끝남 신호가 답 도착보다 먼저 와도 쪽지는 남아 있다가 답이 오면 정리돼요
+    fire(h, 'gen_ended');
+    assert.equal(last(), '');
+    assert.ok(h.api.getPending());
     fire(h, 'received');
     assert.equal(h.api.getPending(), null);
-    assert.equal(prompts.at(-1)[1], '');
+    assert.equal(last(), '');
+    fire(h, 'gen_started', 'normal', {}, false);
+    assert.equal(last(), '');
+});
+
+test('the last long message keeps its ending question', () => {
+    const body = '가'.repeat(2700) + ' 그래서, 너는 어떻게 할 거야?';
+    const h = setup({ chat: [{ name: 'Rei', mes: '안녕' }, { name: 'Rei', mes: body }] }); h.api.init();
+    const user = h.api.buildMessages(h.api.allMoods()[0], '')[1].content;
+    assert.match(user, /너는 어떻게 할 거야\?/);
+    const older = setup({ chat: [{ name: 'Rei', mes: '나' .repeat(3000) + ' 끝말' }, { name: 'User', is_user: true, mes: '응' }] });
+    older.api.init();
+    assert.match(older.api.buildMessages(older.api.allMoods()[0], '')[1].content, /끝말/);
+});
+
+test('character summaries keep {{user}} and follow the current persona', async () => {
+    let summaryPrompt = '';
+    const context = {
+        characterId: 0, characters: [{ name: 'Rei', avatar: 'rei.png', description: '{{char}}는 {{user}}의 소꿉친구.' }],
+        name1: 'A',
+        substituteParams(t) { return t.replace(/\{\{user\}\}/gi, this.name1).replace(/\{\{char\}\}/gi, 'Rei'); },
+        generateRaw: async (data) => { summaryPrompt = data.prompt; return '- 관계: {{user}}의 소꿉친구'; },
+    };
+    const h = setup(context); h.api.init();
+    await h.api.makeSummary();
+    assert.match(summaryPrompt, /Rei는 \{\{user\}\}의 소꿉친구/);
+    assert.doesNotMatch(summaryPrompt, /A의 소꿉친구/);
+    assert.match(h.api.buildMessages(h.api.allMoods()[0], '')[1].content, /A의 소꿉친구/);
+    h.context.name1 = 'B';
+    const user = h.api.buildMessages(h.api.allMoods()[0], '')[1].content;
+    assert.match(user, /B의 소꿉친구/); assert.doesNotMatch(user, /A의 소꿉친구/);
+    h.api.showStored();
+});
+
+test('legacy summaries without the placeholder show a rebuild warning', () => {
+    const h = setup({ characterId: 0, characters: [{ name: 'Rei', avatar: 'rei.png', description: '설명' }] });
+    h.api.settings().charSummaries['rei.png'] = { text: '- 관계: A의 소꿉친구', hash: '1', date: '2026-10-01' };
+    h.api.init();
+    assert.match(h.$('#cuecard_char_status').html(), /이전 버전 요약/);
+});
+
+test('text completion length fields used by local APIs follow the token limit', async () => {
+    let request;
+    const h = setup({ mainApi: 'textgenerationwebui', powerUserSettings: { instruct: { enabled: false } },
+        TextCompletionService: {
+            constructPrompt() { return 'p'; },
+            presetToGeneratePayload(a, b, data) {
+                return { ...data, num_predict: null, n_predict: null, max_length: 512, options: { num_predict: null } };
+            },
+            async sendRequest(...a) { request = a; return { content: result }; },
+        },
+    });
+    await h.api.requestLLM([{ role: 'user', content: 'x' }], { maxTokens: 1500 });
+    const p = request[0];
+    for (const k of ['max_tokens', 'max_new_tokens', 'max_length', 'n_predict', 'num_predict']) assert.equal(p[k], 1500, k);
+    assert.equal(p.options.num_predict, 1500);
+    const plain = setup({ mainApi: 'textgenerationwebui', powerUserSettings: { instruct: { enabled: false } },
+        TextCompletionService: { constructPrompt() { return 'p'; }, presetToGeneratePayload: (a, b, d) => d,
+            async sendRequest(...a) { request = a; return { content: result }; } } });
+    await plain.api.requestLLM([], { maxTokens: 900 });
+    assert.equal('num_predict' in request[0], false);
+    assert.equal('n_predict' in request[0], false);
 });
 
 test('hidden idea mode falls back to OOC when the API is missing', () => {
