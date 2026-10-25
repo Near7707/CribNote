@@ -41,7 +41,7 @@ function setup(overrides = {}) {
                 each() { return chain; },
                 map() { return { get: () => [] }; },
                 addClass() { return chain; }, removeClass() { return chain; }, toggleClass() { return chain; },
-                hide() { return chain; }, before() { return chain; }, prepend() { return chain; },
+                hide() { el.visible = false; return chain; }, before() { return chain; }, prepend() { return chain; },
             };
             elements.set(key, { el, chain });
         }
@@ -408,17 +408,86 @@ test('a failed rewrite keeps the original note', async () => {
     assert.match(h.$('#cuecard_results').html(), /새 손님이 온다/);
 });
 
-test('pinned notes survive the turn and can be removed', async () => {
+test('pinning opens the collection automatically and removing the last pin hides it', async () => {
     const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), false);
     h.api.togglePin('reply', '하나'); h.api.togglePin('idea', '새 손님이 온다.');
     assert.equal(h.api.getPins().length, 2);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
     assert.match(h.$('#cuecard_results').html(), /fa-thumbtack pinned/);
-    h.context.chat.push({ name: 'User', is_user: true, mes: '보냄' }); fire(h, 'sent');
-    assert.equal(h.context.chatMetadata.cuecard, undefined);
-    assert.equal(h.api.getPins().length, 2);
-    assert.match(h.$('#cuecard_pin_list').html(), /하나/);
     h.api.togglePin('reply', '하나');
     assert.deepEqual(json(h.api.getPins()), [{ type: 'idea', text: '새 손님이 온다.' }]);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    const remove = {};
+    h.$(remove).data('pin', 0);
+    h.elements.get('#cuecard_panel').el.handlers.get('click:.cuecard-unpin').call(remove, { stopPropagation() {} });
+    assert.equal(h.api.getPins().length, 0);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), false);
+    assert.equal(h.context.chatMetadata.cuecard_pins, undefined);
+    assert.equal(h.context.chatMetadata.cuecard_pins_turn, undefined);
+});
+
+test('pin collection defaults open on panel reopen and reload in the same turn', () => {
+    const h = setup(); h.api.init();
+    h.api.togglePin('reply', '같은 턴의 쪽지');
+    h.api.togglePanel(true);
+    const click = h.elements.get('#cuecard_pin_btn').el.handlers.get('click');
+    click(); assert.equal(h.$('#cuecard_pin_box').is(':visible'), false);
+    click(); assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    click(); h.api.togglePanel(false); h.api.togglePanel(true);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    const reloaded = setup({ chat: json(h.context.chat), chatMetadata: json(h.context.chatMetadata) });
+    reloaded.api.init();
+    assert.equal(reloaded.api.getPins().length, 1);
+    assert.equal(reloaded.$('#cuecard_pin_box').is(':visible'), true);
+});
+
+test('turn changes clear pins and hide the collection while preserving notes and summaries', async () => {
+    for (const event of ['sent', 'received', 'swiped', 'edited', 'message_deleted']) {
+        const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+        h.context.chatMetadata.cuecard_note = '내 메모';
+        h.api.settings().charSummaries.avatar = { text: '캐릭터 요약' };
+        h.api.togglePin('reply', '하나'); h.api.togglePin('idea', '새 손님이 온다.');
+        fire(h, event);
+        assert.equal(h.api.getPins().length, 0, event);
+        assert.equal(h.context.chatMetadata.cuecard, undefined, event);
+        assert.equal(h.context.chatMetadata.cuecard_pins, undefined, event);
+        assert.equal(h.context.chatMetadata.cuecard_pins_turn, undefined, event);
+        assert.equal(h.$('#cuecard_pin_box').is(':visible'), false, event);
+        assert.doesNotMatch(h.$('#cuecard_pin_list').html(), /새 손님이 온다/);
+        assert.equal(h.context.chatMetadata.cuecard_note, '내 메모');
+        assert.equal(h.api.settings().charSummaries.avatar.text, '캐릭터 요약');
+    }
+});
+
+test('missed turn events cannot restore or insert expired pins after reload', () => {
+    const h = setup(); h.api.init(); h.api.togglePin('reply', '이전 턴 쪽지');
+    const saved = json(h.context.chatMetadata);
+    h.context.chat.push({ name: 'User', is_user: true, mes: '다음 턴' });
+    const stalePin = {}; h.$(stalePin).data('pin', 0);
+    h.elements.get('#cuecard_panel').el.handlers.get('click:.cuecard-pinned').call(stalePin);
+    assert.equal(h.$('#send_textarea').val(), '');
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), false);
+    const reloaded = setup({ chat: json(h.context.chat), chatMetadata: saved });
+    reloaded.api.init();
+    assert.equal(reloaded.api.getPins().length, 0);
+    assert.equal(reloaded.$('#cuecard_pin_box').is(':visible'), false);
+    reloaded.context.chat.pop(); reloaded.api.togglePanel(true);
+    assert.equal(reloaded.api.getPins().length, 0);
+});
+
+test('legacy pins get a one-time current-turn anchor and chat switches show the right collection', () => {
+    const h = setup({ chatMetadata: { cuecard_pins: [{ type: 'reply', text: '기존 핀' }] } });
+    h.api.init();
+    assert.equal(h.context.chatMetadata.cuecard_pins_turn, h.api.currentTurnKey());
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    const firstChat = h.context.chatMetadata;
+    h.context.chatMetadata = {}; fire(h, 'chat');
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), false);
+    h.context.chatMetadata = firstChat; fire(h, 'chat');
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    h.context.chat.push({ name: 'User', is_user: true, mes: '전송' }); fire(h, 'sent');
+    assert.equal(h.api.getPins().length, 0);
 });
 
 test('hidden idea mode is attached only to the main reply and removed afterwards', async () => {
@@ -536,3 +605,4 @@ test('the main button starts a full request even though jQuery passes an event o
     await h.elements.get('#cuecard_go').el.handlers.get('click')({ type: 'click', target: {} });
     assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
 });
+

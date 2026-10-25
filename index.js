@@ -1,4 +1,4 @@
-// Crib Note v0.9.1 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.2 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -46,6 +46,7 @@
     };
 
     const PIN_KEY = 'cuecard_pins';
+    const PIN_TURN_KEY = 'cuecard_pins_turn';
     const PENDING_KEY = 'cuecard_pending';
     const EXT_PROMPT_KEY = 'cribnote_direction';
 
@@ -325,7 +326,7 @@
                     placeholder="예: 겉으론 무뚝뚝하지만 속으로 걱정 많음. 반말 씀. 위험하면 먼저 나서는 편."></textarea>
             </div>
             <div id="cuecard_pin_box" class="cuecard-box" style="display:none">
-                <div class="cuecard-note-title">📌 쪽지 보관함 <small>(이 채팅방, 턴이 지나도 유지)</small></div>
+                <div class="cuecard-note-title">📌 쪽지 보관함 <small>(이번 턴에만 유지)</small></div>
                 <div id="cuecard_pin_list"></div>
             </div>
             <div id="cuecard_results"></div>
@@ -413,10 +414,13 @@
     function expireResults() {
         if (busy) cancel();
         const c = ctx();
-        if (c.chatMetadata?.[MODULE]) {
+        if (c.chatMetadata && (c.chatMetadata[MODULE] || c.chatMetadata[PIN_KEY] || c.chatMetadata[PIN_TURN_KEY])) {
             delete c.chatMetadata[MODULE];
+            delete c.chatMetadata[PIN_KEY];
+            delete c.chatMetadata[PIN_TURN_KEY];
             (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
         }
+        refreshPins();
         $('#cuecard_results').empty();
         if (busy) $('#cuecard_go').addClass('cuecard-cancel').text('취소 중…');
         else setGoButton('idle');
@@ -439,14 +443,32 @@
         $('#cuecard_note_btn').toggleClass('cuecard-has-note', !!note.trim());
     }
 
-    // ---------- 쪽지 보관함 (채팅방별) ----------
+    // ---------- 쪽지 보관함 (채팅방별, 이번 턴만) ----------
     function saveMeta() {
         const c = ctx();
         (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
     }
     function getPins() {
-        const pins = ctx().chatMetadata?.[PIN_KEY];
-        return Array.isArray(pins) ? pins : [];
+        const meta = ctx().chatMetadata;
+        const pins = meta?.[PIN_KEY];
+        if (!Array.isArray(pins) || !pins.length) return [];
+        const turn = currentTurnKey();
+        // 이전 버전에서 보관한 쪽지는 현재 턴에 한 번 연결해요.
+        if (!meta[PIN_TURN_KEY]) {
+            meta[PIN_TURN_KEY] = turn;
+            saveMeta();
+        } else if (meta[PIN_TURN_KEY] !== turn) {
+            clearPins();
+            return [];
+        }
+        return pins;
+    }
+    function clearPins() {
+        const meta = ctx().chatMetadata;
+        if (!meta || (!meta[PIN_KEY] && !meta[PIN_TURN_KEY])) return;
+        delete meta[PIN_KEY];
+        delete meta[PIN_TURN_KEY];
+        saveMeta();
     }
     function isPinned(type, text) {
         return getPins().some(p => p.type === type && p.text === text);
@@ -458,8 +480,11 @@
         const i = pins.findIndex(p => p.type === type && p.text === text);
         if (i >= 0) pins.splice(i, 1);
         else pins.push({ type, text });
-        c.chatMetadata[PIN_KEY] = pins;
-        saveMeta();
+        if (pins.length) {
+            c.chatMetadata[PIN_KEY] = pins;
+            c.chatMetadata[PIN_TURN_KEY] = currentTurnKey();
+            saveMeta();
+        } else clearPins();
         refreshPins();
         const stored = loadStored();
         if (stored && !busy) renderResults(stored);
@@ -469,8 +494,10 @@
         const pins = getPins();
         if (!c.chatMetadata || !pins[i]) return;
         pins.splice(i, 1);
-        c.chatMetadata[PIN_KEY] = pins;
-        saveMeta();
+        if (pins.length) {
+            c.chatMetadata[PIN_KEY] = pins;
+            saveMeta();
+        } else clearPins();
         refreshPins();
         const stored = loadStored();
         if (stored && !busy) renderResults(stored);
@@ -478,6 +505,7 @@
     function refreshPins() {
         const pins = getPins();
         $('#cuecard_pin_btn').toggleClass('cuecard-has-note', pins.length > 0);
+        $('#cuecard_pin_box').toggle(pins.length > 0);
         $('#cuecard_pin_list').html(pins.length
             ? pins.map((p, i) => `
                 <div class="cuecard-card cuecard-pinned${p.type === 'idea' ? ' idea' : ''}" data-pin="${i}">
@@ -1183,10 +1211,11 @@ Output ONLY valid JSON, no explanations, no code fences:
             scrollPanelTop();
         });
         $('#cuecard_pin_btn').on('click', () => {
+            const show = !$('#cuecard_pin_box').is(':visible');
             refreshPins();
             $('#cuecard_note_box').hide();
             $('#cuecard_char_box').hide();
-            $('#cuecard_pin_box').toggle();
+            $('#cuecard_pin_box').toggle(show);
             scrollPanelTop();
         });
         $('#cuecard_char_make').on('click', makeSummary);
@@ -1238,6 +1267,7 @@ Output ONLY valid JSON, no explanations, no code fences:
         $('#cuecard_panel').on('click', '.cuecard-pinned', function () {
             const p = getPins()[Number($(this).data('pin'))];
             if (p) useNote(p.type, p.text);
+            else refreshPins();
         });
 
         $('#cuecard_panel').on('click', '.cuecard-chip[data-mood]', function () {
@@ -1301,4 +1331,5 @@ Output ONLY valid JSON, no explanations, no code fences:
 
     jQuery(() => init());
 })();
+
 
