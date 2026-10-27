@@ -16,6 +16,7 @@ const source = original.replace('jQuery(() => init());', `globalThis.api = {
 function setup(overrides = {}) {
     const elements = new Map();
     const events = new Map();
+    const observers = [];
     function $(key) {
         if (!elements.has(key)) {
             const el = { value: '', html: '', text: '', checked: false, visible: false, data: {}, handlers: new Map() };
@@ -61,11 +62,18 @@ function setup(overrides = {}) {
         eventSource: { on(name, fn) { if (!events.has(name)) events.set(name, []); events.get(name).push(fn); } },
         ...overrides,
     };
-    const sandbox = { SillyTavern: { getContext: () => context }, $, jQuery() {},
+    class MutationObserver {
+        constructor(callback) { this.callback = callback; observers.push(this); }
+        observe(target) { this.target = target; }
+        disconnect() { this.target = null; }
+    }
+    const sandbox = { SillyTavern: { getContext: () => context }, $, jQuery() {}, MutationObserver,
         AbortController, structuredClone, console: { log() {}, error() {} },
         toastr: { info() {}, warning() {}, success() {} } };
     vm.runInNewContext(source, sandbox);
-    return { api: sandbox.api, context, $, elements, events };
+    return { api: sandbox.api, context, $, elements, events,
+        flushChatMutations() { for (const observer of observers) if (observer.target) observer.callback([]); },
+        observers };
 }
 
 function emit(h, name, value, prop = 'value') {
@@ -466,6 +474,70 @@ test('receiving a freshly generated swipe does not delete original swipe notes',
     assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
 });
 
+test('open panel restores notes and pins when cancelled swipe rolls back after stop events without a swipe event', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); h.api.togglePanel(true);
+    await h.api.generate();
+    const original = json(h.context.chat[0]);
+    h.context.chatMetadata.cuecard.used.reply.push(1);
+    h.api.togglePin('reply', '하나');
+    selectSwipe(h, 1, original.mes); // 로딩 중에는 이전 본문이 남아 있을 수 있어요.
+    fire(h, 'gen_started', 'swipe');
+    assert.equal(h.$('#cuecard_results').html(), '');
+    fire(h, 'gen_ended'); fire(h, 'gen_stopped');
+    Object.assign(h.context.chat[0], original, { swipe_id: 0 });
+    h.flushChatMutations(); // 실리태번의 뒤늦은 redisplayChat. MESSAGE_SWIPED는 발생하지 않아요.
+    assert.equal(h.$('#cuecard_panel').is(':visible'), true);
+    assert.match(h.$('#cuecard_results').html(), /하나/);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.used.reply), [1]);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    assert.equal(h.api.getPins()[0].text, '하나');
+    assert.equal(h.$('#cuecard_go').text(), '한 장 더');
+});
+
+test('generation stop and end refresh a rollback that already happened', async () => {
+    for (const event of ['gen_stopped', 'gen_ended']) {
+        const h = setup({ generateRaw: async () => result }); h.api.init(); h.api.togglePanel(true);
+        await h.api.generate(); const original = json(h.context.chat[0]);
+        selectSwipe(h, 1, '');
+        Object.assign(h.context.chat[0], original, { swipe_id: 0 });
+        fire(h, event);
+        assert.match(h.$('#cuecard_results').html(), /하나/, event);
+    }
+});
+
+test('chat rendering leaves a new swipe empty and does not replace an active note request', async () => {
+    let finish; let calls = 0;
+    const h = setup({ ConnectionManagerRequestService: { sendRequest() {
+        if (++calls === 1) return Promise.resolve({ content: result });
+        return new Promise(resolve => { finish = resolve; });
+    } } });
+    h.api.init(); h.api.togglePanel(true); h.api.settings().profileId = 'p'; await h.api.generate();
+    selectSwipe(h, 1, '새 응답');
+    h.flushChatMutations();
+    assert.equal(h.$('#cuecard_results').html(), '');
+    const pending = h.api.generate();
+    fire(h, 'gen_ended'); h.flushChatMutations();
+    assert.equal(h.api.state().busy, true);
+    assert.match(h.$('#cuecard_results').html(), /쪽지 쓰는 중/);
+    finish({ content: result }); await pending;
+});
+
+test('closing panel disconnects chat observation and next turn cannot resurrect old notes', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); h.api.togglePanel(true);
+    await h.api.generate(); const original = json(h.context.chat[0]);
+    selectSwipe(h, 1, '');
+    h.api.togglePanel(false);
+    assert.ok(h.observers.length);
+    assert.ok(h.observers.every(observer => !observer.target));
+    Object.assign(h.context.chat[0], original, { swipe_id: 0 }); h.flushChatMutations();
+    h.api.togglePanel(true);
+    assert.match(h.$('#cuecard_results').html(), /하나/);
+    fire(h, 'sent');
+    h.flushChatMutations(); fire(h, 'gen_stopped');
+    assert.equal(h.$('#cuecard_results').html(), '');
+    assert.equal(h.context.chatMetadata.cuecard, undefined);
+});
+
 test('next-turn messages, edits and deletes discard the entire swipe collection', async () => {
     for (const event of ['sent', 'received', 'edited', 'message_deleted']) {
         const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
@@ -773,4 +845,5 @@ test('the main button starts a full request even though jQuery passes an event o
     await h.elements.get('#cuecard_go').el.handlers.get('click')({ type: 'click', target: {} });
     assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
 });
+
 

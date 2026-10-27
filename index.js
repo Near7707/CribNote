@@ -1,4 +1,4 @@
-// Crib Note v0.9.4 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.5 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -63,6 +63,7 @@
     let cancelMode = 'request';
     let lastSent = null;        // 마지막으로 보낸 프롬프트
     let summarizing = false;
+    let panelChatObserver = null;
 
     // ---------- 설정 ----------
     function settings() {
@@ -374,6 +375,11 @@
         const $p = $('#cuecard_panel');
         const show = force ?? !$p.is(':visible');
         $p.toggle(show);
+        panelChatObserver?.disconnect();
+        if (show && typeof MutationObserver !== 'undefined' && $('#chat')[0]) {
+            panelChatObserver ??= new MutationObserver(refreshRestoredSwipe);
+            panelChatObserver.observe($('#chat')[0], { childList: true, subtree: true, characterData: true });
+        }
         if (show) { refreshChips(); refreshCycleChips(); refreshPending(); refreshPins(); if (!busy) showStored(); }
     }
 
@@ -466,6 +472,16 @@
             changed = true;
         }
         if (changed) saveMeta();
+    }
+
+    function refreshRestoredSwipe() {
+        if (!$('#cuecard_panel').is(':visible')) return;
+        const cache = ctx().chatMetadata?.[SWIPE_NOTES_KEY];
+        if (!cache || cache.scope !== swipeMessageScope()) return;
+        const key = swipeNoteKey();
+        // 생성 취소 뒤 실리태번은 MESSAGE_SWIPED 없이 원래 응답을 다시 그리기도 해요.
+        // 보관된 응답으로 돌아왔을 때만 갱신해 스트리밍·쪽지 요청 화면은 건드리지 않아요.
+        if (cache.activeKey !== key && cache.entries?.[key]) onSwipeChanged();
     }
 
     function onSwipeChanged(messageId) {
@@ -641,12 +657,14 @@
     function onGenerationEnded() {
         // 지시는 매 생성마다 다시 붙이니까 끝나면 일단 떼요. 쪽지 정리는 MESSAGE_RECEIVED에서 해요.
         setDirectionPrompt('');
+        refreshRestoredSwipe();
     }
     function onGenerationStopped() {
         // 중간에 멈추면 지시만 떼고 쪽지는 다음 답변을 위해 남겨둬요.
         setDirectionPrompt('');
         const p = getPending();
         if (p?.armed) { p.armed = false; saveMeta(); }
+        refreshRestoredSwipe();
     }
     function setPending(text) {
         const c = ctx();
@@ -1465,5 +1483,6 @@ Output ONLY valid JSON, no explanations, no code fences:
 
     jQuery(() => init());
 })();
+
 
 
