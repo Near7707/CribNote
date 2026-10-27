@@ -259,8 +259,8 @@ test('cards survive panel close/reopen and reload during the same turn', async (
     assert.match(reloaded.$('#cuecard_results').html(), /하나/);
 });
 
-test('new messages, swipe, edit and delete clear both types of cards without deleting notes or summaries', async () => {
-    for (const event of ['sent', 'received', 'swiped', 'edited', 'message_deleted']) {
+test('new messages, edit and delete clear both types of cards without deleting notes or summaries', async () => {
+    for (const event of ['sent', 'received', 'edited', 'message_deleted']) {
         const h = setup({ generateRaw: async () => result }); h.api.init();
         h.context.chatMetadata.cuecard_note = '내 메모';
         h.api.settings().charSummaries.avatar = { text: '저장된 요약' };
@@ -345,6 +345,122 @@ test('late responses and stale clicks are rejected even if a chat event was miss
 });
 
 const fire = (h, name, ...args) => { for (const handler of h.events.get(name) || []) handler(...args); };
+
+function selectSwipe(h, index, text, date = `time-${index}`) {
+    const message = h.context.chat.at(-1);
+    message.swipe_id = index;
+    message.mes = text;
+    message.send_date = date;
+    fire(h, 'swiped', h.context.chat.length - 1);
+}
+
+test('returning from an accidental first swipe restores notes, pins and used markers', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    // 기존 응답에는 아직 swipe_id가 없을 수도 있어요.
+    const originalText = h.context.chat[0].mes;
+    h.context.chatMetadata.cuecard.used.reply.push(1);
+    h.api.togglePin('reply', '하나');
+    selectSwipe(h, 1, '다른 응답');
+    assert.equal(h.context.chatMetadata.cuecard, undefined);
+    assert.equal(h.api.getPins().length, 0);
+    assert.equal(h.$('#cuecard_results').html(), '');
+    selectSwipe(h, 0, originalText, 'different-display-time');
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.used.reply), [1]);
+    assert.deepEqual(json(h.api.getPins()), [{ type: 'reply', text: '하나' }]);
+    assert.equal(h.$('#cuecard_pin_box').is(':visible'), true);
+    assert.match(h.$('#cuecard_results').html(), /하나/);
+    assert.equal(h.context.chatMetadata.cuecard.turnKey, h.api.currentTurnKey());
+});
+
+test('each swipe retains its own results and latest pin changes without mixing choices', async () => {
+    let calls = 0;
+    const h = setup({ generateRaw: async () => (++calls === 1 ? result : '{"replies":["다른 선택"],"ideas":["다른 전개"]}') });
+    h.api.init(); await h.api.generate(); const originalText = h.context.chat[0].mes;
+    h.api.togglePin('reply', '하나');
+    selectSwipe(h, 1, '응답 B'); await h.api.generate();
+    h.api.togglePin('idea', '다른 전개');
+    selectSwipe(h, 0, originalText);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+    h.api.togglePin('reply', '하나'); // 복구한 뒤 핀을 해제해도 다음 복구에 반영돼요.
+    selectSwipe(h, 1, '응답 B');
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['다른 선택']);
+    assert.deepEqual(json(h.api.getPins()), [{ type: 'idea', text: '다른 전개' }]);
+    selectSwipe(h, 0, originalText);
+    assert.equal(h.api.getPins().length, 0);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+    assert.equal(calls, 2);
+});
+
+test('reload on an empty alternate swipe preserves the original notes for a later return', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    const originalText = h.context.chat[0].mes; h.api.togglePin('reply', '하나');
+    selectSwipe(h, 1, '응답 B');
+    const reloaded = setup({ chat: json(h.context.chat), chatMetadata: json(h.context.chatMetadata) });
+    reloaded.api.init(); assert.equal(reloaded.context.chatMetadata.cuecard, undefined);
+    selectSwipe(reloaded, 0, originalText);
+    assert.deepEqual(json(reloaded.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+    assert.equal(reloaded.api.getPins()[0].text, '하나');
+});
+
+test('receiving a freshly generated swipe does not delete original swipe notes', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    const originalText = h.context.chat[0].mes;
+    selectSwipe(h, 1, ''); // 새 스와이프가 생성되기 전의 빈 응답
+    h.context.chat[0].mes = '새로 생성된 응답';
+    fire(h, 'received', 0, 'swipe');
+    assert.equal(h.context.chatMetadata.cuecard, undefined);
+    selectSwipe(h, 0, originalText);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+});
+
+test('next-turn messages, edits and deletes discard the entire swipe collection', async () => {
+    for (const event of ['sent', 'received', 'edited', 'message_deleted']) {
+        const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+        const originalText = h.context.chat[0].mes; h.api.togglePin('reply', '하나');
+        selectSwipe(h, 1, '응답 B');
+        assert.ok(h.context.chatMetadata.cuecard_swipe_notes);
+        fire(h, event);
+        assert.equal(h.context.chatMetadata.cuecard_swipe_notes, undefined, event);
+        selectSwipe(h, 0, originalText);
+        assert.equal(h.context.chatMetadata.cuecard, undefined, event);
+        assert.equal(h.api.getPins().length, 0, event);
+    }
+});
+
+test('late regeneration cannot overwrite restored notes after swiping away and back', async () => {
+    let finish; let calls = 0;
+    const h = setup({ ConnectionManagerRequestService: { sendRequest() {
+        if (++calls === 1) return Promise.resolve({ content: result });
+        return new Promise(resolve => { finish = resolve; });
+    } } });
+    h.api.init(); h.api.settings().profileId = 'p'; await h.api.generate();
+    const originalText = h.context.chat[0].mes;
+    const pending = h.api.generate();
+    selectSwipe(h, 1, '다른 응답'); selectSwipe(h, 0, originalText);
+    finish({ content: '{"replies":["뒤늦은 결과"],"ideas":["뒤늦은 전개"]}' }); await pending;
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['하나', '둘']);
+    assert.doesNotMatch(h.$('#cuecard_results').html(), /뒤늦은/);
+});
+
+test('swiping an earlier message clears notes based on the changed context', async () => {
+    const h = setup({ chat: [{ name: 'User', is_user: true, mes: '질문 A' }, { name: 'Character', mes: '응답 A' }], generateRaw: async () => result });
+    h.api.init(); await h.api.generate();
+    selectSwipe(h, 1, '응답 B');
+    h.context.chat[0].mes = '질문 B'; fire(h, 'swiped', 0);
+    assert.equal(h.context.chatMetadata.cuecard_swipe_notes, undefined);
+    selectSwipe(h, 0, '응답 A');
+    assert.equal(h.context.chatMetadata.cuecard, undefined);
+});
+
+test('legacy current-turn notes migrate when the first swipe event is observed', () => {
+    const h = setup(); const originalText = h.context.chat[0].mes;
+    h.context.chatMetadata.cuecard = {
+        replies: ['기존 노트'], ideas: [], turnKey: h.api.currentTurnKey(), used: { reply: [], idea: [] },
+    };
+    h.api.init(); selectSwipe(h, 1, '다른 응답'); selectSwipe(h, 0, originalText);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['기존 노트']);
+});
 
 test('custom moods join chips, random pool and prompt; deleting resets the selection', () => {
     const h = setup(); h.api.init();
@@ -443,7 +559,7 @@ test('pin collection defaults open on panel reopen and reload in the same turn',
 });
 
 test('turn changes clear pins and hide the collection while preserving notes and summaries', async () => {
-    for (const event of ['sent', 'received', 'swiped', 'edited', 'message_deleted']) {
+    for (const event of ['sent', 'received', 'edited', 'message_deleted']) {
         const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
         h.context.chatMetadata.cuecard_note = '내 메모';
         h.api.settings().charSummaries.avatar = { text: '캐릭터 요약' };

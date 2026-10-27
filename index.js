@@ -1,4 +1,4 @@
-// Crib Note v0.9.2 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.3 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -47,6 +47,7 @@
 
     const PIN_KEY = 'cuecard_pins';
     const PIN_TURN_KEY = 'cuecard_pins_turn';
+    const SWIPE_NOTES_KEY = 'cuecard_swipe_notes';
     const PENDING_KEY = 'cuecard_pending';
     const EXT_PROMPT_KEY = 'cribnote_direction';
 
@@ -383,7 +384,7 @@
 
     function setStatus(html) { $('#cuecard_results').html(`<div class="cuecard-status">${html}</div>`); }
 
-    // 같은 턴에서는 유지하되 다음 메시지/스와이프에서는 만료해요.
+    // 같은 메시지의 스와이프는 복구하고, 다음 메시지로 진행하면 정리해요.
     function currentTurnKey() {
         const chat = ctx().chat || [];
         const last = chat[chat.length - 1];
@@ -393,7 +394,94 @@
         ]);
     }
 
+    function swipeNoteKey(turnKey) {
+        if (arguments.length === 0) turnKey = currentTurnKey();
+        try {
+            const [count, , name, isUser, swipeId, textHash] = JSON.parse(turnKey);
+            if (!Number.isInteger(count) || typeof textHash !== 'string') return null;
+            // 첫 스와이프 때 생기는 swipe_id: 0, 바뀔 수 있는 표시 시각은 같은 응답으로 취급해요.
+            return JSON.stringify([count, name, !!isUser, swipeId ?? 0, textHash]);
+        } catch { return null; }
+    }
+
+    function sameMessageSlot(a, b) {
+        if (!a || !b) return false;
+        const x = JSON.parse(a), y = JSON.parse(b);
+        return x[0] === y[0] && x[2] === y[2];
+    }
+
+    function swipeMessageScope() {
+        const chat = ctx().chat || [];
+        const prev = chat[chat.length - 2];
+        return JSON.stringify([chat.length, !!chat[chat.length - 1]?.is_user,
+            prev?.name ?? '', prev?.send_date ?? null, hashStr(String(prev?.mes || ''))]);
+    }
+
+    function syncSwipeNotes() {
+        const meta = ctx().chatMetadata;
+        if (!meta) return;
+        const key = swipeNoteKey(), scope = swipeMessageScope(), turn = currentTurnKey();
+        let cache = meta[SWIPE_NOTES_KEY];
+        if (cache && cache.scope !== scope) {
+            // 다른 메시지 위치의 기록은 이어받지 않아요.
+            delete meta[SWIPE_NOTES_KEY];
+            delete meta[MODULE]; delete meta[PIN_KEY]; delete meta[PIN_TURN_KEY];
+            saveMeta();
+            return;
+        }
+        let changed = false;
+        if (!cache) {
+            const resultKey = swipeNoteKey(meta[MODULE]?.turnKey);
+            const pins = meta[PIN_KEY];
+            const pinKey = Array.isArray(pins) && pins.length
+                ? (meta[PIN_TURN_KEY] ? swipeNoteKey(meta[PIN_TURN_KEY]) : key) : null;
+            const activeKey = sameMessageSlot(resultKey, key) ? resultKey
+                : sameMessageSlot(pinKey, key) ? pinKey : null;
+            if (!activeKey) return;
+            cache = meta[SWIPE_NOTES_KEY] = { scope, activeKey, entries: {} };
+            changed = true;
+        }
+        if (cache.activeKey !== key) {
+            const result = swipeNoteKey(meta[MODULE]?.turnKey) === cache.activeKey ? meta[MODULE] : null;
+            const pins = Array.isArray(meta[PIN_KEY])
+                && (!meta[PIN_TURN_KEY] || swipeNoteKey(meta[PIN_TURN_KEY]) === cache.activeKey) ? meta[PIN_KEY] : [];
+            if (result || pins.length) cache.entries[cache.activeKey] = structuredClone({ result, pins });
+            else delete cache.entries[cache.activeKey];
+            const restored = cache.entries[key];
+            delete meta[MODULE]; delete meta[PIN_KEY]; delete meta[PIN_TURN_KEY];
+            if (restored?.result) meta[MODULE] = { ...structuredClone(restored.result), turnKey: turn };
+            if (restored?.pins?.length) {
+                meta[PIN_KEY] = structuredClone(restored.pins);
+                meta[PIN_TURN_KEY] = turn;
+            }
+            cache.activeKey = key;
+            changed = true;
+        }
+        if (meta[MODULE] && swipeNoteKey(meta[MODULE].turnKey) === key && meta[MODULE].turnKey !== turn) {
+            meta[MODULE].turnKey = turn;
+            changed = true;
+        }
+        if (meta[PIN_TURN_KEY] && swipeNoteKey(meta[PIN_TURN_KEY]) === key && meta[PIN_TURN_KEY] !== turn) {
+            meta[PIN_TURN_KEY] = turn;
+            changed = true;
+        }
+        if (changed) saveMeta();
+    }
+
+    function onSwipeChanged(messageId) {
+        if (Number.isInteger(messageId) && messageId !== (ctx().chat?.length || 0) - 1) {
+            expireResults();
+            return;
+        }
+        if (busy) cancel();
+        syncSwipeNotes();
+        refreshPins();
+        showStored();
+        if (busy) $('#cuecard_go').addClass('cuecard-cancel').text('취소 중…');
+    }
+
     function loadStored() {
+        syncSwipeNotes();
         const c = ctx();
         const stored = c.chatMetadata?.[MODULE];
         if (stored && stored.turnKey !== currentTurnKey()) {
@@ -407,17 +495,20 @@
     function storeResult(data) {
         const c = ctx();
         if (!c.chatMetadata) return;
+        syncSwipeNotes();
         c.chatMetadata[MODULE] = data;
+        syncSwipeNotes();
         (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
     }
 
     function expireResults() {
         if (busy) cancel();
         const c = ctx();
-        if (c.chatMetadata && (c.chatMetadata[MODULE] || c.chatMetadata[PIN_KEY] || c.chatMetadata[PIN_TURN_KEY])) {
+        if (c.chatMetadata && (c.chatMetadata[MODULE] || c.chatMetadata[PIN_KEY] || c.chatMetadata[PIN_TURN_KEY] || c.chatMetadata[SWIPE_NOTES_KEY])) {
             delete c.chatMetadata[MODULE];
             delete c.chatMetadata[PIN_KEY];
             delete c.chatMetadata[PIN_TURN_KEY];
+            delete c.chatMetadata[SWIPE_NOTES_KEY];
             (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
         }
         refreshPins();
@@ -449,6 +540,7 @@
         (c.saveMetadataDebounced || c.saveMetadata)?.call(c);
     }
     function getPins() {
+        syncSwipeNotes();
         const meta = ctx().chatMetadata;
         const pins = meta?.[PIN_KEY];
         if (!Array.isArray(pins) || !pins.length) return [];
@@ -483,6 +575,7 @@
         if (pins.length) {
             c.chatMetadata[PIN_KEY] = pins;
             c.chatMetadata[PIN_TURN_KEY] = currentTurnKey();
+            syncSwipeNotes();
             saveMeta();
         } else clearPins();
         refreshPins();
@@ -1296,9 +1389,14 @@ Output ONLY valid JSON, no explanations, no code fences:
         for (const name of ['CONNECTION_PROFILE_LOADED', 'CONNECTION_PROFILE_CREATED', 'CONNECTION_PROFILE_UPDATED', 'CONNECTION_PROFILE_DELETED', 'SETTINGS_LOADED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], fillProfileSelect);
         }
-        for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_DELETED']) {
+        for (const name of ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_DELETED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], expireResults);
         }
+        if (c.event_types.MESSAGE_SWIPED) c.eventSource.on(c.event_types.MESSAGE_SWIPED, onSwipeChanged);
+        if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, (messageId, type) => {
+            if (type === 'swipe') onSwipeChanged(messageId);
+            else expireResults();
+        });
         // 몰래 반영: 본편 답변 생성 때만 지시를 붙이고, 답이 오면 정리
         if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, onGenerationStarted);
         if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => {
