@@ -1,4 +1,4 @@
-// Crib Note v0.9.3 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.4 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -872,17 +872,52 @@ Output only the summary.` },
         return s.slice(0, head) + '\n…(중략)…\n' + s.slice(-(n - head));
     }
 
-    // 상태창·정보블록 걸러내기
-    function cleanMessage(text) {
+    // 별도 표시한 캐릭터 속마음은 추천 API에 보내기 전에 내용까지 제외해요.
+    function stripPrivateThoughts(text) {
+        const privateName = /^(?:inner[_-]?info|(?:inner|internal|private)[_-]?(?:thoughts?|monologue)|thoughts?)(?:[_-](?:box|panel|content|block|container))?$/i;
+        const isPrivate = (name, tag) => {
+            if (privateName.test(name)) return true;
+            const attributes = tag.matchAll(/\s(?:class|id|data-type)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s/>]+))/gi);
+            return Array.from(attributes).some(a => (a[1] ?? a[2] ?? a[3]).split(/\s+/).some(v => privateName.test(v)));
+        };
+        // div 같은 같은 이름의 태그가 중첩돼도 바깥 속마음 블록 전체를 제외해요.
+        const tags = /<!--[\s\S]*?-->|<\/?([a-z][\w:.-]*)\b[^>]*>/gi;
+        const voidTags = /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i;
+        let out = '', cursor = 0;
+        const hidden = [];
+        for (const match of text.matchAll(tags)) {
+            const tag = match[0], name = match[1]?.toLowerCase();
+            if (!hidden.length) out += text.slice(cursor, match.index);
+            if (name && hidden.length) {
+                if (/^<\//.test(tag)) {
+                    const depth = hidden.lastIndexOf(name);
+                    if (depth >= 0) hidden.length = depth;
+                } else if (!voidTags.test(name) && !/\/\s*>$/.test(tag)) hidden.push(name);
+            } else if (name && !/^<\//.test(tag) && isPrivate(name, tag)) {
+                if (!voidTags.test(name) && !/\/\s*>$/.test(tag)) hidden.push(name);
+                out += '\n';
+            } else if (!hidden.length) out += tag;
+            cursor = match.index + tag.length;
+        }
+        if (!hidden.length) out += text.slice(cursor);
+        return out;
+    }
+
+    // 상태창·정보블록 걸러내기. 유저 자신의 속마음은 말투·행동 참고에 남겨요.
+    function cleanMessage(text, excludeThoughts = true) {
         let t = String(text || '');
+        if (excludeThoughts) t = stripPrivateThoughts(t);
         t = t.replace(/<(think|thinking)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '');
         t = t.replace(/```[\s\S]*?```/g, '');                                   // 코드블록
-        t = t.replace(/<(infoblock|inner_info|timeline(?:\s+info)?|details|style|script|table|pre|code|statusbar|status|info)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '');
+        t = t.replace(/<(infoblock|timeline(?:\s+info)?|details|style|script|table|pre|code|statusbar|status|info)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '');
         t = t.replace(/<!--[\s\S]*?-->/g, '');
         t = t.replace(/<[^>]+>/g, '');                                            // 남은 태그
         t = t.split('\n').filter(line => {
             const l = line.trim();
             if (!l) return true;
+            const label = l.replace(/^(?:>\s*|[-+]\s+)*/, '').replace(/[*_`]/g, '');
+            const thoughtLine = /^💭/u.test(label) || /^(?:\[\s*(?:속마음|내면\s*독백|inner\s*thoughts?|private\s*thoughts?)\s*\]|(?:속마음|속생각|내면(?:의)?\s*(?:생각|독백)|마음속(?:의)?\s*생각|(?:inner|private|internal)?[\s-]*thoughts?)\s*[:：])/i.test(label);
+            if (thoughtLine) return !excludeThoughts;
             if (/^[|┃│╔╗╚╝═─━┌┐└┘├┤]/.test(l)) return false;                    // 표·박스 줄
             if (/^\[[^\]]{0,80}\]$/.test(l)) return false;                       // [날짜: …] 같은 한 줄 태그
             if (/^[^\w가-힣"'*「『(“‘]{1,3}\s*[^:：]{1,15}[:：]/.test(l) && l.length < 80) return false; // 📍장소: … 📅날짜: …
@@ -946,17 +981,17 @@ Output only the summary.` },
             blocks.push(`<user_note about="${userName}">\n${clip(note, 1000)}\n</user_note>`);
         }
 
-        const prep = (mes) => cleanMessage(mes);
+        const prep = (m) => cleanMessage(m.mes, !m.is_user);
         const visible = (c.chat || []).filter(m => !m.is_system && m.mes);
         const recent = visible.slice(-st.contextMessages);
         const chat = recent
-            .map((m, i) => `${m.name}: ${clipEnds(prep(m.mes), i === recent.length - 1 ? 6000 : 2500)}`)
+            .map((m, i) => `${m.name}: ${clipEnds(prep(m), i === recent.length - 1 ? 6000 : 2500)}`)
             .join('\n\n');
         blocks.push(`<recent_chat>\n${chat || '(no messages yet)'}\n</recent_chat>`);
 
         // 유저가 실제로 쓴 최근 메시지 = 말투 참고용
         const userSamples = visible.filter(m => m.is_user).slice(-2)
-            .map(m => clip(prep(m.mes), 800)).filter(Boolean);
+            .map(m => clip(prep(m), 800)).filter(Boolean);
         if (userSamples.length) {
             blocks.push(`<user_style_reference>\n${userSamples.join('\n---\n')}\n</user_style_reference>`);
         }
@@ -1001,6 +1036,7 @@ ${tasks.join('\n')}
 Desired mood: ${moodText(mood)}.${direction ? `\nAdditional request from the user: ${direction}` : ''}${opts.rewrite ? `\n${opts.rewrite}` : ''}
 Stay consistent with established facts, characters and setting. Do not repeat things that already happened.
 For "replies", follow ${userName}'s own writing style shown in <user_style_reference> if present.
+Base ${userName}'s replies on dialogue and events they could perceive. Never treat another character's private thoughts, unspoken intentions or secrets as something ${userName} heard or knows.
 The chat may contain status windows, info boxes, dates/locations headers, trackers, HTML or code blocks. These are UI decorations — NEVER imitate or include them. Write only plain story text.
 Follow the language specified for each list exactly, even if the chat is in another language.
 

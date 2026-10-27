@@ -133,6 +133,58 @@ test('status blocks and private thoughts are excluded while story text remains',
     assert.equal(api.cleanMessage('"먼저 가."\n<Inner_Info>SECRET'), '"먼저 가."');
 });
 
+test('private thought tags and marked HTML wrappers exclude the entire nested block', () => {
+    const { api } = setup();
+    for (const block of [
+        '<inner_thought>SECRET\nSECOND_SECRET</inner_thought>',
+        '<THOUGHTS>SECRET</THOUGHTS>',
+        '<private-thoughts>SECRET</private-thoughts>',
+        '<inner_monologue>SECRET</inner_monologue>',
+        '<div class="panel inner-thought"><div>SECRET</div>SECOND_SECRET<br>THIRD_SECRET</div>',
+        "<section id='private_thoughts'><span>SECRET</span></section>",
+        '<div data-type=thought>SECRET</div>',
+    ]) {
+        assert.equal(api.cleanMessage('"출발하자."\n' + block + '\n"기다릴게."'), '"출발하자."\n\n"기다릴게."');
+    }
+    assert.equal(api.cleanMessage('"출발하자."\n<div class="thought">SECRET'), '"출발하자."');
+    assert.equal(api.cleanMessage('<div class="thoughtful">관찰 가능한 행동</div>'), '관찰 가능한 행동');
+    assert.equal(api.cleanMessage('<div data-class="thought">관찰 가능한 행동</div>'), '관찰 가능한 행동');
+});
+
+test('separate thought lines are excluded without deleting quoted dialogue', () => {
+    const { api } = setup();
+    const text = [
+        '"출발하자."',
+        '💭 ' + 'SECRET'.repeat(50),
+        '**속마음:** SECRET',
+        '> Inner thoughts: SECRET',
+        '[속마음] SECRET',
+        'Private thoughts: SECRET',
+        '"속마음: 이건 실제로 말한 대사야."',
+    ].join('\n');
+    const cleaned = api.cleanMessage(text);
+    assert.doesNotMatch(cleaned, /SECRET/);
+    assert.match(cleaned, /출발하자/);
+    assert.match(cleaned, /실제로 말한 대사/);
+});
+
+test('outgoing recommendation context excludes character thoughts but retains user thoughts', async () => {
+    let sent;
+    const h = setup({
+        chat: [
+            { name: 'User', is_user: true, mes: '💭 속마음: USER_PRIVATE\n"함께 가자."' },
+            { name: 'Character', mes: '"좋아."\n<thought>CHARACTER_SECRET_ONE</thought>\n💭 CHARACTER_SECRET_TWO\n속마음: CHARACTER_SECRET_THREE' },
+        ],
+        generateRaw: async data => { sent = data; return result; },
+    });
+    await h.api.generate();
+    assert.doesNotMatch(sent.prompt, /CHARACTER_SECRET/);
+    assert.match(sent.prompt, /USER_PRIVATE/);
+    assert.match(sent.prompt, /함께 가자/);
+    assert.match(sent.prompt, /좋아/);
+    assert.match(sent.systemPrompt, /Never treat another character's private thoughts/);
+});
+
 test('profile requests receive their own signal and per-request token override', async () => {
     let args;
     const h = setup({ ConnectionManagerRequestService: { async sendRequest(...a) { args = a; return { content: result }; } } });
