@@ -193,6 +193,59 @@ test('outgoing recommendation context excludes character thoughts but retains us
     assert.match(sent.systemPrompt, /Never treat another character's private thoughts/);
 });
 
+test('outgoing context ends with the latest story message, after past style samples and history', async () => {
+    let sent;
+    const h = setup({
+        chat: [
+            { name: 'Character', mes: 'OLDER_QUESTION: Which book?' },
+            { name: 'User', is_user: true, mes: 'PAST_REPLY: The blue one.' },
+            { name: 'Character', mes: 'CURRENT_QUESTION: Would you like a bag?' },
+        ],
+        generateRaw: async data => { sent = data; return result; },
+    });
+    await h.api.generate();
+    const styleEnd = sent.prompt.indexOf('</user_style_reference>');
+    const historyStart = sent.prompt.indexOf('<recent_chat>');
+    const targetStart = sent.prompt.indexOf('<latest_message');
+    assert.ok(styleEnd >= 0 && styleEnd < historyStart && historyStart < targetStart);
+    assert.match(sent.prompt.slice(targetStart), /^<latest_message role="character">\nCharacter: CURRENT_QUESTION: Would you like a bag\?\n<\/latest_message>/);
+    assert.doesNotMatch(sent.prompt.slice(targetStart), /OLDER_QUESTION|PAST_REPLY/);
+    assert.equal(sent.prompt.split('CURRENT_QUESTION').length - 1, 1);
+});
+
+test('decoration-only messages do not consume the story context window or become the reply target', () => {
+    const h = setup({ chat: [
+        { name: 'User', is_user: true, mes: 'RELEVANT_ACTION: Open the book.' },
+        { name: 'Character', mes: 'CURRENT_RESPONSE: A map is inside.' },
+        { name: 'Character', mes: '<Inner_Info>PRIVATE_MARKER</Inner_Info>' },
+        { name: 'Character', mes: '<infoblock>STATUS_MARKER</infoblock>' },
+        { name: 'System', is_system: true, mes: 'SYSTEM_MARKER' },
+    ] });
+    h.api.settings().contextMessages = 2;
+    const prompt = h.api.buildMessages(h.api.allMoods()[0], '')[1].content;
+    const history = prompt.split('<recent_chat>')[1].split('</recent_chat>')[0];
+    const target = prompt.split('<latest_message')[1];
+    assert.match(history, /RELEVANT_ACTION/);
+    assert.doesNotMatch(history, /CURRENT_RESPONSE/);
+    assert.match(target, /CURRENT_RESPONSE/);
+    assert.doesNotMatch(prompt, /PRIVATE_MARKER|STATUS_MARKER|SYSTEM_MARKER/);
+    assert.equal(h.context.chat.length, 5); // 채팅 원본은 바꾸지 않아요.
+});
+
+test('a one-message context targets the selected swipe, then follows a new user turn', () => {
+    const h = setup({ chat: [
+        { name: 'Character', mes: 'OLD_REPLY' },
+        { name: 'Character', mes: 'SELECTED_SWIPE', swipe_id: 1, swipes: ['UNSELECTED_SWIPE', 'SELECTED_SWIPE'] },
+    ] });
+    h.api.settings().contextMessages = 1;
+    const messages = () => h.api.buildMessages(h.api.allMoods()[0], '');
+    assert.match(messages()[1].content, /<latest_message role="character">\nCharacter: SELECTED_SWIPE/);
+    assert.doesNotMatch(messages()[1].content, /OLD_REPLY|UNSELECTED_SWIPE/);
+    h.context.chat.push({ name: 'User', is_user: true, mes: 'NEW_USER_ACTION' });
+    assert.match(messages()[1].content, /<latest_message role="user">\nUser: NEW_USER_ACTION/);
+    assert.doesNotMatch(messages()[1].content, /SELECTED_SWIPE/);
+});
+
 test('profile requests receive their own signal and per-request token override', async () => {
     let args;
     const h = setup({ ConnectionManagerRequestService: { async sendRequest(...a) { args = a; return { content: result }; } } });
@@ -299,7 +352,7 @@ test('profile list is refreshed by events, never by reopening the native select'
 
 test('summary token override leaves saved settings unchanged even when request fails', async () => {
     let tokens;
-    const h = setup({ characterId: 0, characters: [{ name: 'Alt', avatar: 'alt.png', description: 'A gamer.' }],
+    const h = setup({ characterId: 0, characters: [{ name: 'Character', avatar: 'character.png', description: 'A character.' }],
         generateRaw: async data => { tokens = data.responseLength; throw new Error('API failed'); } });
     await h.api.makeSummary();
     assert.equal(tokens, 2500); assert.equal(h.api.settings().maxTokens, 1500);

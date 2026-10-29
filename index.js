@@ -1,4 +1,4 @@
-// Crib Note v0.9.5 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.6 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -999,20 +999,23 @@ Output only the summary.` },
             blocks.push(`<user_note about="${userName}">\n${clip(note, 1000)}\n</user_note>`);
         }
 
-        const prep = (m) => cleanMessage(m.mes, !m.is_user);
-        const visible = (c.chat || []).filter(m => !m.is_system && m.mes);
-        const recent = visible.slice(-st.contextMessages);
-        const chat = recent
-            .map((m, i) => `${m.name}: ${clipEnds(prep(m), i === recent.length - 1 ? 6000 : 2500)}`)
-            .join('\n\n');
-        blocks.push(`<recent_chat>\n${chat || '(no messages yet)'}\n</recent_chat>`);
-
-        // 유저가 실제로 쓴 최근 메시지 = 말투 참고용
+        const visible = (c.chat || []).filter(m => !m.is_system && m.mes)
+            .map(m => ({ ...m, text: cleanMessage(m.mes, !m.is_user) }))
+            .filter(m => m.text);
+        // 과거의 말투 예시가 현재 대화의 마지막 메시지처럼 보이지 않게 먼저 넣어요.
         const userSamples = visible.filter(m => m.is_user).slice(-2)
-            .map(m => clip(prep(m), 800)).filter(Boolean);
+            .map(m => clip(m.text, 800));
         if (userSamples.length) {
             blocks.push(`<user_style_reference>\n${userSamples.join('\n---\n')}\n</user_style_reference>`);
         }
+
+        const recent = visible.slice(-st.contextMessages);
+        const latest = recent.at(-1);
+        const chat = recent.slice(0, -1)
+            .map(m => `${m.name}: ${clipEnds(m.text, 2500)}`).join('\n\n');
+        blocks.push(`<recent_chat>\n${chat || '(no earlier messages in this window)'}\n</recent_chat>`);
+        blocks.push(`<latest_message role="${latest?.is_user ? 'user' : 'character'}">\n` +
+            `${latest ? `${latest.name}: ${clipEnds(latest.text, 6000)}` : '(no visible story text)'}\n</latest_message>`);
 
         const langName = (v) => v === 'ko' ? 'Korean' : v === 'en' ? 'English' : 'the same language as the recent chat';
         const replyLang = langName(st.language);
@@ -1034,24 +1037,29 @@ Output only the summary.` },
                 `Never decide ${charName}'s reactions or other characters' actions. ` +
                 `Match the formatting style of the recent chat (quotes for speech, asterisks for actions, etc.). ` +
                 `${formRule} ` +
-                `Make each candidate meaningfully different in approach. ${lengthRule} ` +
+                `Vary the wording, attitude or immediate response while keeping every candidate grounded in the same current situation. ${lengthRule} ` +
                 `Write the replies in ${replyLang}.`);
         }
         if (counts.ideaCount > 0) {
             tasks.push(`- "ideas": exactly ${counts.ideaCount} short story-development ideas (one sentence each) for what could happen next ` +
-                `— an event, a new arrival, a change in the environment, a discovery, etc. ` +
+                `— a plausible opening that grows out of the current scene, such as an action, discovery or change in the environment. ` +
                 `Write them as neutral director's notes, not as dialogue. Write the ideas in ${ideaLang}.`);
         }
 
         const system =
 `You are a creative assistant helping a user continue an ongoing roleplay story.
 The user plays ${userName}. The AI plays ${charName}${c.groupId ? ' and others' : ''}.
-Read the context and suggest how the story could continue from the latest message.
+Continue immediately after <latest_message>, the latest visible story message. <recent_chat> is earlier history.
+For replies, first address the latest perceptible dialogue, question, action or immediate situation. Do not answer an older message as if it were still the latest one, unless the latest message explicitly returns to it.
+Keep the current location, participants and ongoing actions consistent. Do not invent past events, agreements, relationships or knowledge to justify a suggestion.
+<user_style_reference> contains past writing samples for style only, not new messages to answer or actions to repeat.
+If the latest message is the user's own, treat that contribution as already completed; do not repeat it or invent another character's response.
 
 Produce:
 ${tasks.join('\n')}
 
 Desired mood: ${moodText(mood)}.${direction ? `\nAdditional request from the user: ${direction}` : ''}${opts.rewrite ? `\n${opts.rewrite}` : ''}
+Relevance and continuity take priority over variety and mood. Apply mood within the current scene; do not force a topic change or an unrelated event just to make the options different.
 Stay consistent with established facts, characters and setting. Do not repeat things that already happened.
 For "replies", follow ${userName}'s own writing style shown in <user_style_reference> if present.
 Base ${userName}'s replies on dialogue and events they could perceive. Never treat another character's private thoughts, unspoken intentions or secrets as something ${userName} heard or knows.
