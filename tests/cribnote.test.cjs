@@ -20,9 +20,11 @@ function setup(overrides = {}) {
     function $(key) {
         if (!elements.has(key)) {
             const el = { value: '', html: '', text: '', checked: false, visible: false, data: {}, handlers: new Map() };
+            const node = new EventTarget();
+            node.focus = () => {};
             const chain = {
                 length: 1,
-                0: { focus() {} },
+                0: node,
                 val(v) { if (v === undefined) return el.value; el.value = v; return chain; },
                 text(v) { if (v === undefined) return el.text; el.text = v; return chain; },
                 html(v) { if (v === undefined) return el.html; el.html = v; return chain; },
@@ -68,7 +70,7 @@ function setup(overrides = {}) {
         disconnect() { this.target = null; }
     }
     const sandbox = { SillyTavern: { getContext: () => context }, $, jQuery() {}, MutationObserver,
-        AbortController, structuredClone, console: { log() {}, error() {} },
+        AbortController, Event, structuredClone, console: { log() {}, error() {} },
         toastr: { info() {}, warning() {}, success() {} } };
     vm.runInNewContext(source, sandbox);
     return { api: sandbox.api, context, $, elements, events,
@@ -409,6 +411,23 @@ test('card selection replaces existing input and other choices; sending removes 
     for (const handler of h.events.get('sent')) handler();
     assert.equal(h.$('#send_textarea').val(), '하나');
     assert.equal(h.context.chatMetadata.cuecard, undefined);
+});
+
+test('selecting replies and OOC notes notifies native input listeners with the replacement text', () => {
+    const h = setup();
+    const observed = [];
+    h.$('#send_textarea')[0].addEventListener('input', event => {
+        observed.push({ text: h.$('#send_textarea').val(), bubbles: event.bubbles });
+    });
+    h.$('#send_textarea').val('Old draft');
+    h.api.useNote('reply', 'A long reply.\nA second line.');
+    h.api.useNote('reply', 'Short reply.');
+    h.api.useNote('idea', 'A visitor arrives.');
+    assert.deepEqual(observed, [
+        { text: 'A long reply.\nA second line.', bubbles: true },
+        { text: 'Short reply.', bubbles: true },
+        { text: '(OOC: A visitor arrives.)', bubbles: true },
+    ]);
 });
 
 test('reload discards expired and legacy cards and never restores them when rewinding', async () => {

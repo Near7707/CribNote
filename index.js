@@ -1,4 +1,4 @@
-// Crib Note v0.9.6 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.7 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -873,7 +873,9 @@ Output only the summary.` },
 
     function insertText(text) {
         const $ta = $('#send_textarea');
-        $ta.val(text).trigger('input');
+        $ta.val(text);
+        // 실리태번의 자동 높이 조절·초안 저장은 브라우저 기본 input 이벤트를 들어요.
+        $ta[0]?.dispatchEvent(new Event('input', { bubbles: true }));
         $ta[0]?.focus();
     }
 
