@@ -1,4 +1,4 @@
-// Crib Note v0.9.8 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.10.0 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -990,6 +990,50 @@ Output only the summary.` },
         return mood.desc ? `${mood.label} — ${mood.desc}` : mood.label;
     }
 
+    function visibleMessages() {
+        return (ctx().chat || []).filter(m => !m.is_system && m.mes)
+            .map(m => ({ ...m, text: cleanMessage(m.mes, !m.is_user) }))
+            .filter(m => m.text);
+    }
+
+    // ---------- 베끼기 거르기 ----------
+    // 최근 대화와 긴 구절이 그대로 겹치는 쪽지를 찾아요. (짧은 단어·호칭이 겹치는 건 괜찮아요)
+    function normForEcho(t) {
+        return String(t || '').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
+    }
+    function echoWindow(norm) {
+        return /[가-힣ぁ-んァ-ン一-龥]/.test(norm) ? 14 : 28;
+    }
+    function makeEchoChecker(sourceTexts) {
+        const sources = sourceTexts.map(normForEcho).filter(Boolean);
+        const cache = new Map();
+        const grams = (n) => {
+            if (!cache.has(n)) {
+                const set = new Set();
+                for (const src of sources) for (let i = 0; i + n <= src.length; i++) set.add(src.slice(i, i + n));
+                cache.set(n, set);
+            }
+            return cache.get(n);
+        };
+        return (text) => {
+            const norm = normForEcho(text);
+            const n = echoWindow(norm);
+            if (norm.length < n) return false;
+            const set = grams(n);
+            for (let i = 0; i + n <= norm.length; i++) if (set.has(norm.slice(i, i + n))) return true;
+            return false;
+        };
+    }
+    function dropEchoes(data) {
+        const recent = visibleMessages().slice(-settings().contextMessages);
+        const isEcho = makeEchoChecker(recent.map(m => m.text));
+        const keep = (list) => {
+            const fresh = list.filter(t => !isEcho(t));
+            return fresh.length ? fresh : list;   // 전부 걸리면 빈손보다는 그대로 보여줘요
+        };
+        return { ...data, replies: keep(data.replies), ideas: keep(data.ideas) };
+    }
+
     function buildMessages(mood, direction, opts = {}) {
         const c = ctx();
         const st = settings();
@@ -1024,14 +1068,13 @@ Output only the summary.` },
             blocks.push(`<user_note about="${userName}">\n${clip(note, 1000)}\n</user_note>`);
         }
 
-        const visible = (c.chat || []).filter(m => !m.is_system && m.mes)
-            .map(m => ({ ...m, text: cleanMessage(m.mes, !m.is_user) }))
-            .filter(m => m.text);
+        const visible = visibleMessages();
         // 과거의 말투 예시가 현재 대화의 마지막 메시지처럼 보이지 않게 먼저 넣어요.
+        // 길이까지 따라 하지 않게 짧게 잘라서 말투만 보여줘요.
         const userSamples = visible.filter(m => m.is_user).slice(-2)
-            .map(m => clip(m.text, 800));
+            .map(m => clip(m.text, 400));
         if (userSamples.length) {
-            blocks.push(`<user_style_reference>\n${userSamples.join('\n---\n')}\n</user_style_reference>`);
+            blocks.push(`<user_style_reference note="voice and formatting only — ignore their length">\n${userSamples.join('\n---\n')}\n</user_style_reference>`);
         }
 
         const recent = visible.slice(-st.contextMessages);
@@ -1047,9 +1090,9 @@ Output only the summary.` },
         const ideaLang = langName(st.ideaLanguage);
 
         const lengthRule = {
-            short: 'Keep each one very short: 1-2 brief sentences.',
-            long: 'Make each one richer: about 4-7 sentences with more action, feeling and detail.',
-        }[st.lastLength] || 'Keep each 1-4 sentences.';
+            short: 'LENGTH = SHORT: each reply is very short — 1-2 brief sentences, at most about 80 characters in Korean or 30 words in English.',
+            long: 'LENGTH = LONG: each reply is richer — about 4-7 sentences (roughly 250-500 characters in Korean) with more action, feeling and detail.',
+        }[st.lastLength] || 'LENGTH = NORMAL: each reply is 1-4 sentences, roughly 80-250 characters in Korean or 20-60 words in English.';
         const formRule = {
             dialogue: `Write ONLY spoken lines of ${userName} — no narration, no action descriptions.`,
             action: `Write ONLY ${userName}'s actions, gestures and expressions as narration — no spoken dialogue at all.`,
@@ -1066,9 +1109,12 @@ Output only the summary.` },
                 `Write the replies in ${replyLang}.`);
         }
         if (counts.ideaCount > 0) {
-            tasks.push(`- "ideas": exactly ${counts.ideaCount} short story-development ideas (one sentence each) for what could happen next ` +
-                `— a plausible opening that grows out of the current scene, such as an action, discovery or change in the environment. ` +
-                `Write them as neutral director's notes, not as dialogue. Write the ideas in ${ideaLang}.`);
+            tasks.push(`- "ideas": exactly ${counts.ideaCount} story-development ideas for what could happen next, each 1-2 sentences, written as a short director's note (not dialogue) in ${ideaLang}.
+  * Grow every idea out of something ALREADY in this story: an unanswered question or promise, an object or place that was mentioned, a character's goal, habit, secret or past, tension in the relationship, or a consequence of what just happened. Name that specific detail.
+  * Make the ideas different kinds — for example one where ${charName} acts on their own wants or hidden motive, one from the world or setting, one that shifts the relationship. Do not give two ideas of the same kind.
+  * Each idea should hand ${userName} something interesting to react to. Never decide what ${userName} says, does or feels.
+  * No generic filler that could fit any story (a sudden knock at the door, a phone call, a power outage, a mysterious stranger, sudden rain, a loud noise outside) unless the story already set it up.
+  * Keep the genre and tone. Move the story a small-to-medium step; do not end the scene or jump to an unrelated event.`);
         }
 
         const system =
@@ -1086,11 +1132,13 @@ ${tasks.join('\n')}
 Desired mood: ${moodText(mood)}.${direction ? `\nAdditional request from the user: ${direction}` : ''}${opts.rewrite ? `\n${opts.rewrite}` : ''}
 Relevance and continuity take priority over variety and mood. Apply mood within the current scene; do not force a topic change or an unrelated event just to make the options different.
 Stay consistent with established facts, characters and setting. Do not repeat things that already happened.
-For "replies", follow ${userName}'s own writing style shown in <user_style_reference> if present.
+For "replies", follow ${userName}'s own voice shown in <user_style_reference> if present — tone, speech habits and formatting only, NOT its length.
+Write fresh wording. Do not copy, quote back or lightly reword sentences from <recent_chat>, <latest_message> or the character sheet — especially ${charName}'s lines. Do not mirror ${charName}'s sentence structure, signature phrases, rhythm or narration style; ${userName} speaks in their own voice. Reacting to what was said is fine; repeating it is not.
 Base ${userName}'s replies on dialogue and events they could perceive. Never treat another character's private thoughts, unspoken intentions or secrets as something ${userName} heard or knows.
 The chat may contain status windows, info boxes, dates/locations headers, trackers, HTML or code blocks. These are UI decorations — NEVER imitate or include them. Write only plain story text.
 Follow the language specified for each list exactly, even if the chat is in another language.
 
+${counts.replyCount > 0 ? `Before answering, check every reply against this rule — it overrides the length of the chat and the style samples: ${lengthRule}\n` : ''}
 Output ONLY valid JSON, no explanations, no code fences:
 Each array element must contain ONE complete candidate only. Put alternatives in separate array elements, never a numbered list or a nested array inside one element.
 Use exactly the requested number of elements in each list; use an empty array for an unrequested list:
@@ -1315,7 +1363,7 @@ ${JSON.stringify({ replies: Array.from({ length: counts.replyCount }, (_, i) => 
                 renderResults(cur);
                 return;
             }
-            const data = { ...parsed, requestedCounts: { ...counts }, moodLabel, moodId: mood.id, turnKey: sourceTurn, used: { reply: [], idea: [] } };
+            const data = { ...dropEchoes(parsed), requestedCounts: { ...counts }, moodLabel, moodId: mood.id, turnKey: sourceTurn, used: { reply: [], idea: [] } };
             storeResult(data);
             renderResults(data);
         } catch (err) {

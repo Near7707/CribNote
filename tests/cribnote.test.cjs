@@ -798,7 +798,7 @@ test('custom moods join chips, random pool and prompt; deleting resets the selec
 test('length and form chips cycle and change the reply instructions', () => {
     const h = setup(); h.api.init();
     const mood = h.api.allMoods()[0];
-    assert.match(h.api.buildMessages(mood, '')[0].content, /Keep each 1-4 sentences/);
+    assert.match(h.api.buildMessages(mood, '')[0].content, /LENGTH = NORMAL: each reply is 1-4 sentences/);
     h.api.cycleSetting('lastLength'); assert.equal(h.api.settings().lastLength, 'short');
     h.api.cycleSetting('lastForm'); assert.equal(h.api.settings().lastForm, 'dialogue');
     const system = h.api.buildMessages(mood, '')[0].content;
@@ -1036,3 +1036,62 @@ test('the main button starts a full request even though jQuery passes an event o
 });
 
 
+
+test('short length is spelled out, repeated last and outranks the style samples', () => {
+    const long = '"' + '나'.repeat(900) + '"';
+    const h = setup({ chat: [{ name: 'User', is_user: true, mes: long }, { name: 'Character', mes: '"그래서?"' }] });
+    h.api.init(); h.api.cycleSetting('lastLength');
+    const [system, user] = h.api.buildMessages(h.api.allMoods()[0], '').map(m => m.content);
+    assert.match(system, /at most about 80 characters/);
+    assert.match(system, /NOT its length/);
+    const jsonAt = system.indexOf('Output ONLY valid JSON');
+    assert.ok(system.lastIndexOf('LENGTH = SHORT') > system.indexOf('Produce:'));
+    assert.ok(system.lastIndexOf('LENGTH = SHORT') < jsonAt);
+    assert.match(system, /overrides the length of the chat and the style samples/);
+    const style = user.slice(user.indexOf('<user_style_reference'), user.indexOf('</user_style_reference>'));
+    assert.match(style, /ignore their length/);
+    assert.ok(style.length < 600);
+});
+
+test('idea instructions ask for story-specific, varied, non-generic developments', () => {
+    const h = setup(); h.api.init();
+    const system = h.api.buildMessages(h.api.allMoods()[0], '')[0].content;
+    assert.match(system, /ALREADY in this story/);
+    assert.match(system, /different kinds/);
+    assert.match(system, /No generic filler/);
+    assert.match(system, /Never decide what User says, does or feels/);
+    const noIdeas = h.api.buildMessages(h.api.allMoods()[0], '', { counts: { replyCount: 2, ideaCount: 0 } })[0].content;
+    assert.doesNotMatch(noIdeas, /No generic filler/);
+});
+
+test('replies that copy a long line from the chat are filtered out', async () => {
+    const line = '"오늘 밤에는 절대로 혼자서 그 다리를 건너지 마, 알겠지?"';
+    const raw = JSON.stringify({
+        replies: ['"오늘 밤에는 절대로, 혼자서 그 다리를 건너지 마라고?" *되묻는다.*', '"알았어. 대신 같이 가줘."'],
+        ideas: ['다리 건너편에서 그가 숨겨 온 편지가 발견된다.'],
+    });
+    const h = setup({ chat: [{ name: 'Character', mes: line }], generateRaw: async () => raw });
+    h.api.init(); h.api.settings().replyCount = 2; h.api.settings().ideaCount = 1;
+    await h.api.generate();
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['"알았어. 대신 같이 가줘."']);
+    assert.equal(h.context.chatMetadata.cuecard.ideas.length, 1);
+    const system = h.context.chatMetadata.cuecard && h.api.buildMessages(h.api.allMoods()[0], '')[0].content;
+    assert.match(system, /Do not copy, quote back or lightly reword/);
+});
+
+test('when every reply echoes the chat, they are kept rather than showing nothing', async () => {
+    const line = '"오늘 밤에는 절대로 혼자서 그 다리를 건너지 마, 알겠지?"';
+    const raw = JSON.stringify({ replies: ['오늘 밤에는 절대로 혼자서 그 다리를 건너지 않을게.'], ideas: [] });
+    const h = setup({ chat: [{ name: 'Character', mes: line }], generateRaw: async () => raw });
+    h.api.init(); h.api.settings().replyCount = 1; h.api.settings().ideaCount = 0;
+    await h.api.generate();
+    assert.equal(h.context.chatMetadata.cuecard.replies.length, 1);
+});
+
+test('short shared words and names are not treated as copying', async () => {
+    const raw = JSON.stringify({ replies: ['"다리? 좋아, 같이 건너자."', '"알겠어."'], ideas: [] });
+    const h = setup({ chat: [{ name: 'Character', mes: '"다리를 건너지 마, 알겠지?"' }], generateRaw: async () => raw });
+    h.api.init(); h.api.settings().replyCount = 2; h.api.settings().ideaCount = 0;
+    await h.api.generate();
+    assert.equal(h.context.chatMetadata.cuecard.replies.length, 2);
+});
