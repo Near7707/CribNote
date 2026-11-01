@@ -131,6 +131,123 @@ test('truncated JSON, plain text, wrong types and empty results fail without bog
     }
 });
 
+test('bundled arrays, encoded arrays and explicit candidate headings become separate cards', () => {
+    const { api } = setup();
+    const replies = ['"First reply."', '"Second reply."', '"Third reply."'];
+    for (const bundled of [
+        [replies],
+        [JSON.stringify(replies)],
+        [{ text: JSON.stringify(replies) }],
+        ['답변 1: "First reply."\n답변 2: "Second reply."\n답변 3: "Third reply."'],
+        ['**Option 1:**\n"First reply."\n\n**Option 2:**\n"Second reply."\n\n**Option 3:**\n"Third reply."'],
+        ['**Option 1**: "First reply."\n**Option 2**: "Second reply."\n**Option 3**: "Third reply."'],
+        ['1. "First reply."\n\n2. "Second reply."\n\n3. "Third reply."'],
+    ]) {
+        const parsed = api.parseResult(JSON.stringify({ replies: bundled, ideas: [] }), { replyCount: 3, ideaCount: 0 });
+        assert.deepEqual(json(parsed.replies), replies);
+    }
+    const ideas = api.parseResult(JSON.stringify({ replies: [], ideas: [['A visitor arrives.', 'Rain begins.']] }), { replyCount: 0, ideaCount: 2 });
+    assert.deepEqual(json(ideas.ideas), ['A visitor arrives.', 'Rain begins.']);
+    const bold = api.parseResult(JSON.stringify({ replies: ['Reply 1: **First action.**\nReply 2: **Second action.**'], ideas: [] }), { replyCount: 2, ideaCount: 0 });
+    assert.deepEqual(json(bold.replies), ['**First action.**', '**Second action.**']);
+});
+
+test('paragraphs, ordinary lists and ambiguous numbering inside one candidate remain intact', () => {
+    const { api } = setup();
+    for (const text of [
+        '"Hello."\n\n*Opens the book.*\n"Look at this."',
+        'Items to buy:\n\n1. Milk\n\n2. Bread\n\n3. Tea',
+        '1. Milk\n\n2. Bread\n\n3. Tea',
+        '1. "One."\n2. "Two."\n3. "Three."',
+        '답변 1: "One."\n답변 3: "Three."',
+    ]) {
+        const parsed = api.parseResult(JSON.stringify({ replies: [text], ideas: [] }), { replyCount: 3, ideaCount: 0 });
+        assert.deepEqual(json(parsed.replies), [text]);
+    }
+});
+
+test('output example matches requested list sizes for full generation and a single rewrite', () => {
+    const h = setup();
+    for (const counts of [{ replyCount: 3, ideaCount: 2 }, { replyCount: 1, ideaCount: 0 }, { replyCount: 0, ideaCount: 2 }]) {
+        const system = h.api.buildMessages(h.api.allMoods()[0], '', { counts })[0].content;
+        const example = JSON.parse(system.slice(system.lastIndexOf('\n') + 1));
+        assert.equal(example.replies.length, counts.replyCount);
+        assert.equal(example.ideas.length, counts.ideaCount);
+    }
+});
+
+test('bundled generation produces independently selectable cards with no extra API request', async () => {
+    let calls = 0;
+    const h = setup({ generateRaw: async () => {
+        calls++;
+        return JSON.stringify({ replies: ['Reply 1: "First."\nReply 2: "Second."\nReply 3: "Third."'], ideas: [] });
+    } });
+    h.api.init(); h.api.settings().ideaCount = 0;
+    await h.api.generate();
+    assert.equal(calls, 1);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['"First."', '"Second."', '"Third."']);
+    const card = {};
+    h.$(card).data('type', 'reply').data('idx', 1);
+    h.elements.get('#cuecard_panel').el.handlers.get('click:.cuecard-card').call(card);
+    assert.equal(h.$('#send_textarea').val(), '"Second."');
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.used.reply), [1]);
+    assert.doesNotMatch(h.$('#cuecard_results').html(), /cuecard-count-note/);
+});
+
+test('short results remain usable and show requested versus received counts without retrying', async () => {
+    let calls = 0;
+    const h = setup({ generateRaw: async () => { calls++; return '{"replies":["One reply."],"ideas":[]}'; } });
+    h.api.init(); await h.api.generate();
+    assert.equal(calls, 1);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['One reply.']);
+    assert.match(h.$('#cuecard_results').html(), /대사 1\/3개/);
+    assert.match(h.$('#cuecard_results').html(), /전개 0\/2개/);
+    h.api.settings().replyCount = 5;
+    h.api.togglePanel(false); h.api.togglePanel(true);
+    assert.match(h.$('#cuecard_results').html(), /대사 1\/3개/);
+    assert.equal(calls, 1);
+});
+
+test('additional request persists for same-turn rerolls and can be cleared independently', async () => {
+    const prompts = [];
+    const h = setup({ generateRaw: async data => { prompts.push(data.systemPrompt); return result; } });
+    h.api.init(); h.api.settings().autoClose = false;
+    const st = h.api.settings();
+    h.$('#cuecard_note').val('Memo');
+    h.$('#send_textarea').val('Draft');
+    h.$('#cuecard_direction').val('Keep it calm.');
+    h.elements.get('#cuecard_direction').el.handlers.get('input')();
+    assert.equal(h.$('#cuecard_direction_clear').prop('disabled'), false);
+    await h.api.generate(); await h.api.generate();
+    assert.ok(prompts.every(p => p.includes('Keep it calm.')));
+    h.api.togglePanel(false); h.api.togglePanel(true);
+    assert.equal(h.$('#cuecard_direction').val(), 'Keep it calm.');
+    h.elements.get('#cuecard_direction_clear').el.handlers.get('click')();
+    assert.equal(h.$('#cuecard_direction').val(), '');
+    assert.equal(h.$('#cuecard_direction_clear').prop('disabled'), true);
+    assert.equal(h.$('#cuecard_note').val(), 'Memo');
+    assert.equal(h.$('#send_textarea').val(), 'Draft');
+    assert.ok(h.context.chatMetadata.cuecard);
+    assert.equal(h.api.settings(), st);
+    await h.api.generate();
+    assert.doesNotMatch(prompts.at(-1), /Keep it calm\./);
+});
+
+test('next messages and chat changes clear additional request but swipe cancellation keeps it', async () => {
+    const h = setup({ generateRaw: async () => result }); h.api.init(); await h.api.generate();
+    const original = h.context.chat[0].mes;
+    h.$('#cuecard_direction').val('Temporary direction.');
+    selectSwipe(h, 1, ''); fire(h, 'gen_stopped'); selectSwipe(h, 0, original);
+    assert.equal(h.$('#cuecard_direction').val(), 'Temporary direction.');
+    for (const event of ['sent', 'received', 'chat']) {
+        h.$('#cuecard_direction').val('Temporary direction.');
+        h.elements.get('#cuecard_direction').el.handlers.get('input')();
+        fire(h, event);
+        assert.equal(h.$('#cuecard_direction').val(), '', event);
+        assert.equal(h.$('#cuecard_direction_clear').prop('disabled'), true, event);
+    }
+});
+
 test('status blocks and private thoughts are excluded while story text remains', () => {
     const { api } = setup();
     for (const block of [

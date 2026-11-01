@@ -1,4 +1,4 @@
-// Crib Note v0.9.7 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.9.8 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -301,8 +301,12 @@
             </div>
             <div id="cuecard_pending" class="cuecard-pending" style="display:none"></div>
             <div class="cuecard-actions">
-                <input id="cuecard_direction" class="text_pole" type="text"
-                    placeholder="추가 요청 (선택) 예: 탈출하는 쪽으로">
+                <div class="cuecard-direction-field">
+                    <input id="cuecard_direction" class="text_pole" type="text"
+                        placeholder="추가 요청 (이번 턴만) 예: 탈출하는 쪽으로">
+                    <button id="cuecard_direction_clear" type="button" title="추가 요청 비우기"
+                        aria-label="추가 요청 비우기" disabled>×</button>
+                </div>
                 <div id="cuecard_go" class="menu_button">쪽지 받기</div>
                 <div id="cuecard_pin_btn" class="menu_button fa-solid fa-thumbtack" title="쪽지 보관함"></div>
                 <div id="cuecard_char_btn" class="menu_button fa-solid fa-address-card" title="캐릭터 요약"></div>
@@ -389,6 +393,20 @@
     }
 
     function setStatus(html) { $('#cuecard_results').html(`<div class="cuecard-status">${html}</div>`); }
+
+    function refreshDirectionClear() {
+        $('#cuecard_direction_clear').prop('disabled', !String($('#cuecard_direction').val() || '').length);
+    }
+
+    function clearDirection() {
+        $('#cuecard_direction').val('');
+        refreshDirectionClear();
+    }
+
+    function onNextMessage() {
+        clearDirection();
+        expireResults();
+    }
 
     // 같은 메시지의 스와이프는 복구하고, 다음 메시지로 진행하면 정리해요.
     function currentTurnKey() {
@@ -857,6 +875,11 @@ Output only the summary.` },
     function renderResults(data, loading = null) {
         const used = data.used || { reply: [], idea: [] };
         let html = `<div class="cuecard-moodtag">분위기: ${escapeHtml(data.moodLabel || '')}</div>`;
+        const requested = data.requestedCounts || {};
+        const short = [['대사', 'replyCount', data.replies.length], ['전개', 'ideaCount', data.ideas.length]]
+            .filter(([, key, got]) => Number.isInteger(requested[key]) && requested[key] > got)
+            .map(([label, key, got]) => `${label} ${got}/${requested[key]}개`);
+        if (short.length) html += `<div class="cuecard-count-note" role="status">이번엔 ${short.join(' · ')}를 받았어요. 더 필요하면 ‘한 장 더’를 눌러주세요.</div>`;
         if (data.replies.length) {
             html += '<div class="cuecard-section">💬 대사 쪽지</div>';
             data.replies.forEach((t, i) => { html += cardHtml('reply', t, i, used, loading); });
@@ -1069,7 +1092,9 @@ The chat may contain status windows, info boxes, dates/locations headers, tracke
 Follow the language specified for each list exactly, even if the chat is in another language.
 
 Output ONLY valid JSON, no explanations, no code fences:
-{"replies": ["..."], "ideas": ["..."]}`;
+Each array element must contain ONE complete candidate only. Put alternatives in separate array elements, never a numbered list or a nested array inside one element.
+Use exactly the requested number of elements in each list; use an empty array for an unrequested list:
+${JSON.stringify({ replies: Array.from({ length: counts.replyCount }, (_, i) => `Candidate reply ${i + 1}`), ideas: Array.from({ length: counts.ideaCount }, (_, i) => `Story idea ${i + 1}`) })}`;
 
         return [
             { role: 'system', content: system },
@@ -1146,10 +1171,38 @@ Output ONLY valid JSON, no explanations, no code fences:
         return result;
     }
 
-    function toList(v) {
+    function splitBundledSuggestions(text, count) {
+        // 명시된 후보 제목, 또는 빈 줄로 구분된 번호+대사/행동 형식만 복구해요.
+        const marker = /^(?:#{1,3}[ \t]+)?(\*\*)?(?:(답변|선택지|후보|대사|reply|response|option|candidate|answer)[ \t]*#?[ \t]*(\d+)|([0-9]+)[.)])[ \t]*(?:[:：.)-][ \t]*)?/gim;
+        const matches = [...text.matchAll(marker)];
+        if (matches.length < 2 || matches.length > count || matches[0].index !== 0) return [text];
+        if (!matches.every((m, i) => Number(m[3] || m[4]) === i + 1)) return [text];
+        const parts = matches.map((m, i) => {
+            const part = text.slice(m.index + m[0].length, matches[i + 1]?.index ?? text.length);
+            return (m[1] ? part.replace(/^\*\*[ \t]*[:：.)-]?[ \t]*/, '') : part).trim();
+        });
+        if (parts.some(p => !p)) return [text];
+        const labelled = matches.every(m => m[2]);
+        const separated = matches.slice(1).every(m => /\r?\n[ \t]*\r?\n[ \t]*$/.test(text.slice(0, m.index)));
+        if (!labelled && !(separated && parts.every(p => /^["“「『*]/.test(p)))) return [text];
+        return parts;
+    }
+
+    function toList(v, count, depth = 0) {
         if (!Array.isArray(v)) return [];
-        return v.map(x => typeof x === 'string' ? x : (typeof x?.text === 'string' ? x.text : ''))
-            .map(x => x.trim()).filter(Boolean);
+        const list = v.flatMap(x => {
+            if (Array.isArray(x)) return depth < 3 ? toList(x, count, depth + 1) : [];
+            const text = (typeof x === 'string' ? x : (typeof x?.text === 'string' ? x.text : '')).trim();
+            if (!text) return [];
+            if (depth < 3 && text.startsWith('[')) {
+                try {
+                    const nested = JSON.parse(text);
+                    if (Array.isArray(nested)) return toList(nested, count, depth + 1);
+                } catch { /* 일반 문장은 그대로 남겨요. */ }
+            }
+            return [cleanSuggestion(text)];
+        }).filter(Boolean);
+        return list.length === 1 && count > 1 ? splitBundledSuggestions(list[0], count) : list;
     }
 
     function parseResult(raw, counts = settings()) {
@@ -1166,8 +1219,8 @@ Output ONLY valid JSON, no explanations, no code fences:
                     || (counts.replyCount > 0 && !Array.isArray(j.replies))
                     || (counts.ideaCount > 0 && !Array.isArray(j.ideas))) throw new Error('Invalid result shape');
                 const data = {
-                    replies: toList(j.replies).map(cleanSuggestion).filter(Boolean).slice(0, counts.replyCount),
-                    ideas: toList(j.ideas).map(cleanSuggestion).filter(Boolean).slice(0, counts.ideaCount),
+                    replies: toList(j.replies, counts.replyCount).slice(0, counts.replyCount),
+                    ideas: toList(j.ideas, counts.ideaCount).slice(0, counts.ideaCount),
                 };
                 if (data.replies.length || data.ideas.length) return data;
             } catch { /* 아래로 */ }
@@ -1262,7 +1315,7 @@ Output ONLY valid JSON, no explanations, no code fences:
                 renderResults(cur);
                 return;
             }
-            const data = { ...parsed, moodLabel, moodId: mood.id, turnKey: sourceTurn, used: { reply: [], idea: [] } };
+            const data = { ...parsed, requestedCounts: { ...counts }, moodLabel, moodId: mood.id, turnKey: sourceTurn, used: { reply: [], idea: [] } };
             storeResult(data);
             renderResults(data);
         } catch (err) {
@@ -1394,6 +1447,9 @@ Output ONLY valid JSON, no explanations, no code fences:
         });
         $('#cuecard_go').on('click', () => generate());
         $('#cuecard_direction').on('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); generate(); } });
+        $('#cuecard_direction').on('input', refreshDirectionClear);
+        $('#cuecard_direction_clear').on('click', () => { clearDirection(); $('#cuecard_direction')[0]?.focus(); });
+        refreshDirectionClear();
 
         $('#cuecard_panel').on('click', '.cuecard-cycle', function () {
             cycleSetting(String($(this).data('key')));
@@ -1453,13 +1509,14 @@ Output ONLY valid JSON, no explanations, no code fences:
         for (const name of ['CONNECTION_PROFILE_LOADED', 'CONNECTION_PROFILE_CREATED', 'CONNECTION_PROFILE_UPDATED', 'CONNECTION_PROFILE_DELETED', 'SETTINGS_LOADED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], fillProfileSelect);
         }
-        for (const name of ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_DELETED']) {
+        for (const name of ['MESSAGE_EDITED', 'MESSAGE_DELETED']) {
             if (c.event_types[name]) c.eventSource.on(c.event_types[name], expireResults);
         }
+        if (c.event_types.MESSAGE_SENT) c.eventSource.on(c.event_types.MESSAGE_SENT, onNextMessage);
         if (c.event_types.MESSAGE_SWIPED) c.eventSource.on(c.event_types.MESSAGE_SWIPED, onSwipeChanged);
         if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, (messageId, type) => {
             if (type === 'swipe') onSwipeChanged(messageId);
-            else expireResults();
+            else onNextMessage();
         });
         // 몰래 반영: 본편 답변 생성 때만 지시를 붙이고, 답이 오면 정리
         if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, onGenerationStarted);
@@ -1471,7 +1528,7 @@ Output ONLY valid JSON, no explanations, no code fences:
         c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
             if (busy) cancel();
             lastSent = null;
-            $('#cuecard_direction').val('');
+            clearDirection();
             $('#cuecard_note_box').hide();
             $('#cuecard_char_box').hide();
             $('#cuecard_pin_box').hide();

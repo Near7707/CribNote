@@ -49,10 +49,37 @@
     gap: 5px;
     align-items: center;
 }
-.cuecard-actions #cuecard_direction {
+.cuecard-direction-field {
+    position: relative;
     flex: 1;
+    min-width: 140px;
+}
+.cuecard-actions #cuecard_direction {
+    box-sizing: border-box;
+    width: 100%;
+    padding-right: 32px;
     margin: 0;
 }
+#cuecard_direction_clear {
+    position: absolute;
+    top: 50%;
+    right: 2px;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+#cuecard_direction_clear:disabled { opacity: 0.3; cursor: default; }
 .cuecard-actions .menu_button {
     margin: 0;
     white-space: nowrap;
@@ -69,6 +96,7 @@
     font-size: 0.8em;
     opacity: 0.6;
 }
+.cuecard-count-note { font-size: 0.85em; margin: 5px 0; opacity: 0.8; }
 .cuecard-card {
     padding: 7px 10px;
     margin-bottom: 5px;
@@ -149,7 +177,7 @@
 
 /* v0.5 */
 .cuecard-actions { flex-wrap: wrap; }
-.cuecard-actions #cuecard_direction { min-width: 140px; }
+.cuecard-actions #cuecard_direction { min-width: 0; }
 .cuecard-box { margin-top: 6px; }
 #cuecard_char_summary { width: 100%; margin: 0; }
 .cuecard-char-status { font-size: 0.85em; opacity: 0.8; margin-bottom: 4px; }
