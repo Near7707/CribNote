@@ -1111,3 +1111,32 @@ test('the idea chip can switch idea notes off without losing the saved count', a
     assert.equal(h.api.settings().ideaMode, 'ooc');
     assert.match(h.api.buildMessages(h.api.allMoods()[0], '')[0].content, /"ideas": exactly 2/);
 });
+
+test('replies drop *asterisks* when the user writes narration as plain text', async () => {
+    let sent = '';
+    const raw = JSON.stringify({ replies: ['*고개를 끄덕인다.* "좋아."', '*잠시 망설인다.*'], ideas: ['*창문이 덜컹거린다.*'] });
+    const h = setup({
+        chat: [{ name: 'User', is_user: true, mes: '고개를 들었다. "응, 나도 갈게."' }, { name: 'Character', mes: '*웃는다.* "그럼 가자."' }],
+        generateRaw: async (d) => { sent = d.systemPrompt; return raw; },
+    });
+    h.api.init(); h.api.settings().replyCount = 2; h.api.settings().ideaCount = 1;
+    await h.api.generate();
+    assert.match(sent, /plain text with NO asterisks/);
+    assert.doesNotMatch(sent, /asterisks for actions/);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['고개를 끄덕인다. "좋아."', '잠시 망설인다.']);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.ideas), ['창문이 덜컹거린다.']);
+});
+
+test('replies keep *asterisks* when the user writes that way, ideas never do', async () => {
+    let sent = '';
+    const raw = JSON.stringify({ replies: ['*고개를 끄덕인다.* "좋아."'], ideas: ['*창문이 덜컹거린다.*'] });
+    const h = setup({
+        chat: [{ name: 'User', is_user: true, mes: '*고개를 든다.* "응."' }, { name: 'Character', mes: '그가 웃었다.' }],
+        generateRaw: async (d) => { sent = d.systemPrompt; return raw; },
+    });
+    h.api.init(); h.api.settings().replyCount = 1; h.api.settings().ideaCount = 1;
+    await h.api.generate();
+    assert.match(sent, /wrap actions and narration in \*asterisks\*/);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.replies), ['*고개를 끄덕인다.* "좋아."']);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.ideas), ['창문이 덜컹거린다.']);
+});

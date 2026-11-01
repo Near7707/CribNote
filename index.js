@@ -1,4 +1,4 @@
-// Crib Note v0.10.1 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.10.2 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -1000,6 +1000,27 @@ Output only the summary.` },
             .filter(m => m.text);
     }
 
+    // ---------- 별표(*나레이션*) 쓰는지 ----------
+    // 내 최근 메시지(없으면 최근 대화) 중 절반 이상이 *…*를 쓰면 별표 스타일로 봐요.
+    function narrationStyle(visible = visibleMessages()) {
+        const mine = visible.filter(m => m.is_user).slice(-5);
+        const pool = mine.length ? mine : visible.slice(-5);
+        if (!pool.length) return 'plain';
+        const starred = pool.filter(m => /\*[^*\n]+\*/.test(String(m.mes || ''))).length;
+        return starred * 2 >= pool.length ? 'asterisk' : 'plain';
+    }
+    function stripStars(t) {
+        return String(t || '').replace(/\*{1,3}([^*\n]+?)\*{1,3}/g, '$1').replace(/\*+/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+    }
+    // 별표를 안 쓰는 대화면 대사 쪽지의 별표를 떼요. 전개 쪽지는 연출 메모라 늘 떼요.
+    function tidyMarkup(data, style = narrationStyle()) {
+        return {
+            ...data,
+            replies: style === 'plain' ? data.replies.map(stripStars).filter(Boolean) : data.replies,
+            ideas: data.ideas.map(stripStars).filter(Boolean),
+        };
+    }
+
     // ---------- 베끼기 거르기 ----------
     // 최근 대화와 긴 구절이 그대로 겹치는 쪽지를 찾아요. (짧은 단어·호칭이 겹치는 건 괜찮아요)
     function normForEcho(t) {
@@ -1097,6 +1118,9 @@ Output only the summary.` },
             short: 'LENGTH = SHORT: each reply is very short — 1-2 brief sentences, at most about 80 characters in Korean or 30 words in English.',
             long: 'LENGTH = LONG: each reply is richer — about 4-7 sentences (roughly 250-500 characters in Korean) with more action, feeling and detail.',
         }[st.lastLength] || 'LENGTH = NORMAL: each reply is 1-4 sentences, roughly 80-250 characters in Korean or 20-60 words in English.';
+        const markupRule = narrationStyle(visible) === 'asterisk'
+            ? `Formatting: like ${userName}'s own messages, wrap actions and narration in *asterisks* and put spoken lines in quotation marks.`
+            : `Formatting: like ${userName}'s own messages, write actions and narration as plain text with NO asterisks or other markdown; put spoken lines in quotation marks.`;
         const formRule = {
             dialogue: `Write ONLY spoken lines of ${userName} — no narration, no action descriptions.`,
             action: `Write ONLY ${userName}'s actions, gestures and expressions as narration — no spoken dialogue at all.`,
@@ -1107,7 +1131,7 @@ Output only the summary.` },
             tasks.push(`- "replies": exactly ${counts.replyCount} different candidate messages that ${userName} could send next. ` +
                 `Write ONLY ${userName}'s own dialogue and actions, in ${userName}'s voice and personality. ` +
                 `Never decide ${charName}'s reactions or other characters' actions. ` +
-                `Match the formatting style of the recent chat (quotes for speech, asterisks for actions, etc.). ` +
+                `${markupRule} ` +
                 `${formRule} ` +
                 `Vary the wording, attitude or immediate response while keeping every candidate grounded in the same current situation. ${lengthRule} ` +
                 `Write the replies in ${replyLang}.`);
@@ -1355,7 +1379,7 @@ ${JSON.stringify({ replies: Array.from({ length: counts.replyCount }, (_, i) => 
                 cancel();
                 return;
             }
-            const parsed = parseResult(raw, counts);
+            const parsed = tidyMarkup(parseResult(raw, counts));
             if (single) {
                 const cur = loadStored();
                 if (!cur) { showStored(); return; }
