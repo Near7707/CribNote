@@ -1095,3 +1095,19 @@ test('short shared words and names are not treated as copying', async () => {
     await h.api.generate();
     assert.equal(h.context.chatMetadata.cuecard.replies.length, 2);
 });
+
+test('the idea chip can switch idea notes off without losing the saved count', async () => {
+    let sent = '';
+    const h = setup({ generateRaw: async (d) => { sent = d.systemPrompt; return '{"replies":["하나","둘"],"ideas":[]}'; } });
+    h.api.init();
+    h.api.cycleSetting('ideaMode'); h.api.cycleSetting('ideaMode');
+    assert.equal(h.api.settings().ideaMode, 'off');
+    assert.equal(h.api.settings().ideaCount, 2);
+    await h.api.generate();
+    assert.doesNotMatch(sent, /"ideas": exactly/);
+    assert.deepEqual(json(h.context.chatMetadata.cuecard.ideas), []);
+    assert.doesNotMatch(h.$('#cuecard_results').html(), /전개 0\/|전개 쪽지/);
+    h.api.cycleSetting('ideaMode');
+    assert.equal(h.api.settings().ideaMode, 'ooc');
+    assert.match(h.api.buildMessages(h.api.allMoods()[0], '')[0].content, /"ideas": exactly 2/);
+});

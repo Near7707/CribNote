@@ -313,3 +313,9 @@
 }
 .cuecard-custom-add input { flex: 1 1 140px; margin: 0; }
 .cuecard-custom-add .menu_button { margin: 0; }
+
+/* v0.10.1 전개 끔 */
+.cuecard-cycle.cuecard-off {
+    opacity: 0.5;
+    text-decoration: line-through;
+}

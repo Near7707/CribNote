@@ -1,4 +1,4 @@
-// Crib Note v0.10.0 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.10.1 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -31,13 +31,15 @@
         customMoods: [],       // 내 분위기 [{id, label, desc}]
         lastLength: 'normal',  // short | normal | long
         lastForm: 'free',      // free | dialogue | action
-        ideaMode: 'ooc',       // ooc: 입력창에 OOC로 / hidden: 다음 답변에 몰래 반영
+        ideaMode: 'ooc',       // ooc: 입력창에 OOC로 / hidden: 다음 답변에 몰래 반영 / off: 전개 쪽지 안 받기
     };
 
     const LENGTHS = { normal: '길이: 보통', short: '길이: 짧게', long: '길이: 길게' };
     const FORMS = { free: '형식: 자유', dialogue: '형식: 대사만', action: '형식: 행동만' };
     const LANGS = { ko: '답변: 한글', en: '답변: EN', auto: '답변: 대화 따라' };
-    const IDEA_MODES = { ooc: '전개: OOC', hidden: '전개: 몰래' };
+    const IDEA_MODES = { ooc: '전개: OOC', hidden: '전개: 몰래', off: '전개: 끔' };
+    // 전개를 끄면 설정한 개수는 기억해두고 요청에서만 0으로 보내요.
+    const ideaCountOf = (st) => st.ideaMode === 'off' ? 0 : st.ideaCount;
     const CYCLES = {
         lastLength: { labels: LENGTHS, select: null },
         lastForm: { labels: FORMS, select: null },
@@ -169,8 +171,9 @@
                     <select id="cuecard_idea_mode" class="text_pole">
                         <option value="ooc">입력창에 (OOC: …)로 넣기</option>
                         <option value="hidden">다음 답변에 몰래 반영 (채팅에 안 남음)</option>
+                        <option value="off">전개 쪽지 안 받기</option>
                     </select>
-                    <small>몰래 반영은 작가 노트처럼 AI한테만 보이고, 다음 답변 한 번만 적용돼요. 패널에서도 바꿀 수 있어요.</small>
+                    <small>몰래 반영은 작가 노트처럼 AI한테만 보이고, 다음 답변 한 번만 적용돼요. 끔으로 두면 대사 쪽지만 받아요. 패널의 전개 칩으로도 바꿀 수 있어요.</small>
 
                     <label class="checkbox_label"><input id="cuecard_use_persona" type="checkbox"> 페르소나 설명 참고</label>
                     <label class="checkbox_label"><input id="cuecard_auto_close" type="checkbox"> 추천을 고르면 패널 자동으로 닫기</label>
@@ -360,7 +363,8 @@
             const label = cfg.labels[st[key]] || Object.values(cfg.labels)[0];
             $(`#cuecard_panel .cuecard-cycle[data-key="${key}"]`).text(label)
                 .toggleClass('selected', key === 'ideaMode' ? st[key] === 'hidden'
-                    : key === 'language' ? false : st[key] !== Object.keys(cfg.labels)[0]);
+                    : key === 'language' ? false : st[key] !== Object.keys(cfg.labels)[0])
+                .toggleClass('cuecard-off', key === 'ideaMode' && st[key] === 'off');
         }
     }
 
@@ -1037,7 +1041,7 @@ Output only the summary.` },
     function buildMessages(mood, direction, opts = {}) {
         const c = ctx();
         const st = settings();
-        const counts = opts.counts || { replyCount: st.replyCount, ideaCount: st.ideaCount };
+        const counts = opts.counts || { replyCount: st.replyCount, ideaCount: ideaCountOf(st) };
         const sub = (t) => (c.substituteParams ? c.substituteParams(t) : t);
         const userName = c.name1 || 'User';
         const charName = c.name2 || 'Character';
@@ -1312,8 +1316,10 @@ ${JSON.stringify({ replies: Array.from({ length: counts.replyCount }, (_, i) => 
         if (single) {
             base = loadStored();
             if (!base) { showStored(); return; }
-        } else if (st.replyCount <= 0 && st.ideaCount <= 0) {
-            toastr.warning('설정에서 답변 후보나 전개 아이디어 개수를 1 이상으로 해주세요.', 'Crib Note');
+        } else if (st.replyCount <= 0 && ideaCountOf(st) <= 0) {
+            toastr.warning(st.ideaMode === 'off' && st.ideaCount > 0
+                ? '대사 쪽지 개수가 0이고 전개 쪽지는 꺼져 있어요. 패널의 전개 칩을 켜거나 설정에서 대사 개수를 올려주세요.'
+                : '설정에서 답변 후보나 전개 아이디어 개수를 1 이상으로 해주세요.', 'Crib Note');
             return;
         }
 
@@ -1326,7 +1332,7 @@ ${JSON.stringify({ replies: Array.from({ length: counts.replyCount }, (_, i) => 
         const sourceMetadata = c.chatMetadata;
         const counts = single
             ? { replyCount: single.type === 'reply' ? 1 : 0, ideaCount: single.type === 'idea' ? 1 : 0 }
-            : { replyCount: st.replyCount, ideaCount: st.ideaCount };
+            : { replyCount: st.replyCount, ideaCount: ideaCountOf(st) };
         setGoButton('busy');
         const mood = (single && allMoods().find(m => m.id === base.moodId)) || pickMood();
         const moodLabel = single ? base.moodLabel : (st.lastMood === 'random' ? `🎲 → ${mood.label}` : mood.label);
