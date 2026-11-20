@@ -312,7 +312,7 @@ test('outgoing recommendation context excludes character thoughts but retains us
     assert.match(sent.systemPrompt, /Never treat another character's private thoughts/);
 });
 
-test('outgoing context ends with the latest story message, after past style samples and history', async () => {
+test('outgoing context ends with the latest story message, after history, with no separate style samples', async () => {
     let sent;
     const h = setup({
         chat: [
@@ -323,10 +323,12 @@ test('outgoing context ends with the latest story message, after past style samp
         generateRaw: async data => { sent = data; return result; },
     });
     await h.api.generate();
-    const styleEnd = sent.prompt.indexOf('</user_style_reference>');
+    assert.doesNotMatch(sent.prompt, /user_style_reference/);
+    assert.equal(sent.prompt.split('PAST_REPLY').length - 1, 1); // 내 지난 메시지는 기록에 한 번만
     const historyStart = sent.prompt.indexOf('<recent_chat>');
     const targetStart = sent.prompt.indexOf('<latest_message');
-    assert.ok(styleEnd >= 0 && styleEnd < historyStart && historyStart < targetStart);
+    assert.ok(historyStart >= 0 && historyStart < targetStart);
+    assert.doesNotMatch(sent.prompt, /<final_beat/); // 짧은 메시지엔 끝 장면을 따로 안 붙여요
     assert.match(sent.prompt.slice(targetStart), /^<latest_message role="character">\nCharacter: CURRENT_QUESTION: Would you like a bag\?\n<\/latest_message>/);
     assert.doesNotMatch(sent.prompt.slice(targetStart), /OLDER_QUESTION|PAST_REPLY/);
     assert.equal(sent.prompt.split('CURRENT_QUESTION').length - 1, 1);
@@ -1037,20 +1039,34 @@ test('the main button starts a full request even though jQuery passes an event o
 
 
 
-test('short length is spelled out, repeated last and outranks the style samples', () => {
+test('short length is spelled out, repeated last and outranks earlier message length', () => {
     const long = '"' + '나'.repeat(900) + '"';
     const h = setup({ chat: [{ name: 'User', is_user: true, mes: long }, { name: 'Character', mes: '"그래서?"' }] });
     h.api.init(); h.api.cycleSetting('lastLength');
     const [system, user] = h.api.buildMessages(h.api.allMoods()[0], '').map(m => m.content);
     assert.match(system, /at most about 80 characters/);
-    assert.match(system, /NOT its length/);
     const jsonAt = system.indexOf('Output ONLY valid JSON');
     assert.ok(system.lastIndexOf('LENGTH = SHORT') > system.indexOf('Produce:'));
     assert.ok(system.lastIndexOf('LENGTH = SHORT') < jsonAt);
-    assert.match(system, /overrides the length of the chat and the style samples/);
-    const style = user.slice(user.indexOf('<user_style_reference'), user.indexOf('</user_style_reference>'));
-    assert.match(style, /ignore their length/);
-    assert.ok(style.length < 600);
+    assert.match(system, /overrides the length of earlier chat messages/);
+    assert.doesNotMatch(user, /user_style_reference/);
+    assert.equal(user.split('나'.repeat(900)).length - 1, 1); // 긴 내 메시지가 예시로 또 들어가지 않아요
+});
+
+test('a long character message gets its final beat pointed out; short or user messages do not', () => {
+    const longMsg = 'EARLY_ACTION: 그는 문을 열고 들어와 가방을 내려놓았다. ' + '방 안은 조용했다. '.repeat(30) + '\n\nFINAL_QUESTION: "그래서, 같이 갈 거야?"';
+    const h = setup({ chat: [{ name: 'User', is_user: true, mes: '안녕' }, { name: 'Character', mes: longMsg }] });
+    const [system, user] = h.api.buildMessages(h.api.allMoods()[0], '').map(m => m.content);
+    const beat = user.split('<final_beat')[1];
+    assert.ok(beat, 'final beat block exists');
+    assert.match(beat, /FINAL_QUESTION/);
+    assert.doesNotMatch(beat, /EARLY_ACTION/);
+    assert.ok(user.indexOf('<final_beat') > user.indexOf('</latest_message>'));
+    assert.match(system, /FINAL beat/);
+    assert.match(system, /do not reuse User's earlier wording/);
+
+    h.context.chat.push({ name: 'User', is_user: true, mes: longMsg });
+    assert.doesNotMatch(h.api.buildMessages(h.api.allMoods()[0], '')[1].content, /<final_beat/);
 });
 
 test('idea instructions ask for story-specific, varied, non-generic developments', () => {

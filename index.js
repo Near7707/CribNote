@@ -1,4 +1,4 @@
-// Crib Note v0.10.2 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
+// Crib Note v0.11.0 — 이야기 맥락을 읽고 답변 후보 + 전개 아이디어를 추천하는 실리태번 확장
 (() => {
     'use strict';
 
@@ -1059,6 +1059,16 @@ Output only the summary.` },
         return { ...data, replies: keep(data.replies), ideas: keep(data.ideas) };
     }
 
+    // 메시지 맨 끝 장면(마지막 문단 쪽)을 돌려줘요. 메시지가 짧거나 문단이 하나면 빈 문자열이에요.
+    function lastBeat(text) {
+        const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length < 2 || String(text).length < 300) return '';
+        const picked = [];
+        let len = 0;
+        for (let i = lines.length - 1; i > 0 && len < 150; i--) { picked.unshift(lines[i]); len += lines[i].length; }
+        return clipEnds(picked.join('\n'), 600);
+    }
+
     function buildMessages(mood, direction, opts = {}) {
         const c = ctx();
         const st = settings();
@@ -1094,13 +1104,8 @@ Output only the summary.` },
         }
 
         const visible = visibleMessages();
-        // 과거의 말투 예시가 현재 대화의 마지막 메시지처럼 보이지 않게 먼저 넣어요.
-        // 길이까지 따라 하지 않게 짧게 잘라서 말투만 보여줘요.
-        const userSamples = visible.filter(m => m.is_user).slice(-2)
-            .map(m => clip(m.text, 400));
-        if (userSamples.length) {
-            blocks.push(`<user_style_reference note="voice and formatting only — ignore their length">\n${userSamples.join('\n---\n')}\n</user_style_reference>`);
-        }
+        // 예전엔 내 지난 메시지를 말투 예시로 따로 보냈는데, 단어·문장 틀까지 베껴서 뺐어요.
+        // 말투는 대화 기록 속 내 메시지에서 알아서 맞춰요.
 
         const recent = visible.slice(-st.contextMessages);
         const latest = recent.at(-1);
@@ -1109,6 +1114,11 @@ Output only the summary.` },
         blocks.push(`<recent_chat>\n${chat || '(no earlier messages in this window)'}\n</recent_chat>`);
         blocks.push(`<latest_message role="${latest?.is_user ? 'user' : 'character'}">\n` +
             `${latest ? `${latest.name}: ${clipEnds(latest.text, 6000)}` : '(no visible story text)'}\n</latest_message>`);
+        // 캐릭터 마지막 메시지가 길면 앞쪽 행동에 답하지 않게, 맨 끝 장면을 따로 짚어줘요.
+        const finalBeat = latest && !latest.is_user ? lastBeat(latest.text) : '';
+        if (finalBeat) {
+            blocks.push(`<final_beat note="the end of latest_message — react to this moment">\n${finalBeat}\n</final_beat>`);
+        }
 
         const langName = (v) => v === 'ko' ? 'Korean' : v === 'en' ? 'English' : 'the same language as the recent chat';
         const replyLang = langName(st.language);
@@ -1151,7 +1161,7 @@ The user plays ${userName}. The AI plays ${charName}${c.groupId ? ' and others' 
 Continue immediately after <latest_message>, the latest visible story message. <recent_chat> is earlier history.
 For replies, first address the latest perceptible dialogue, question, action or immediate situation. Do not answer an older message as if it were still the latest one, unless the latest message explicitly returns to it.
 Keep the current location, participants and ongoing actions consistent. Do not invent past events, agreements, relationships or knowledge to justify a suggestion.
-<user_style_reference> contains past writing samples for style only, not new messages to answer or actions to repeat.
+<latest_message> can hold several beats. For replies, respond to its FINAL beat (shown again in <final_beat> when the message is long) — not to an earlier action or line inside it that the story has already moved past.
 If the latest message is the user's own, treat that contribution as already completed; do not repeat it or invent another character's response.
 
 Produce:
@@ -1160,13 +1170,13 @@ ${tasks.join('\n')}
 Desired mood: ${moodText(mood)}.${direction ? `\nAdditional request from the user: ${direction}` : ''}${opts.rewrite ? `\n${opts.rewrite}` : ''}
 Relevance and continuity take priority over variety and mood. Apply mood within the current scene; do not force a topic change or an unrelated event just to make the options different.
 Stay consistent with established facts, characters and setting. Do not repeat things that already happened.
-For "replies", follow ${userName}'s own voice shown in <user_style_reference> if present — tone, speech habits and formatting only, NOT its length.
+For "replies", keep ${userName}'s general tone and formatting from their messages in the chat, but write brand-new sentences: do not reuse ${userName}'s earlier wording, catchphrases or sentence patterns either.
 Write fresh wording. Do not copy, quote back or lightly reword sentences from <recent_chat>, <latest_message> or the character sheet — especially ${charName}'s lines. Do not mirror ${charName}'s sentence structure, signature phrases, rhythm or narration style; ${userName} speaks in their own voice. Reacting to what was said is fine; repeating it is not.
 Base ${userName}'s replies on dialogue and events they could perceive. Never treat another character's private thoughts, unspoken intentions or secrets as something ${userName} heard or knows.
 The chat may contain status windows, info boxes, dates/locations headers, trackers, HTML or code blocks. These are UI decorations — NEVER imitate or include them. Write only plain story text.
 Follow the language specified for each list exactly, even if the chat is in another language.
 
-${counts.replyCount > 0 ? `Before answering, check every reply against this rule — it overrides the length of the chat and the style samples: ${lengthRule}\n` : ''}
+${counts.replyCount > 0 ? `Before answering, check every reply against this rule — it overrides the length of earlier chat messages: ${lengthRule}\n` : ''}
 Output ONLY valid JSON, no explanations, no code fences:
 Each array element must contain ONE complete candidate only. Put alternatives in separate array elements, never a numbered list or a nested array inside one element.
 Use exactly the requested number of elements in each list; use an empty array for an unrequested list:
